@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/feed_reader.dir/link.d CMakeFiles/feed_reader.dir/src/feed_reader.cpp.o -o feed_reader  -lsqlite3

@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/feed_processor.dir/link.d CMakeFiles/feed_processor.dir/src/feed_processor.cpp.o -o feed_processor  libfeed_parser.a -lxml2

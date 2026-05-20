@@ -1,0 +1,7 @@
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/feed_parser.dir
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/feed_processor.dir
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/feed_reader.dir
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/feed_parser_test.dir
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/feed_processor_test.dir
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/edit_cache.dir
+/home/iris/emacs-stdio-jsonrpc-newsticker/build/CMakeFiles/rebuild_cache.dir

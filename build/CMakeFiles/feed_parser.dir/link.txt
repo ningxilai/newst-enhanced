@@ -1,0 +1,2 @@
+/usr/bin/ar qc libfeed_parser.a CMakeFiles/feed_parser.dir/src/feed_parser.cpp.o
+/usr/bin/ranlib libfeed_parser.a
