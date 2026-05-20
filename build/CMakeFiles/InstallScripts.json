@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/iris/emacs-stdio-jsonrpc-newsticker/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
