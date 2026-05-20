@@ -131,7 +131,8 @@
     (list feed-name
           (newsticker--title item) (newsticker--desc item)
           (newsticker--link item)
-          (nth 0 tv) (nth 1 tv) (nth 2 tv) (nth 3 tv)
+          (or (nth 0 tv) 0) (or (nth 1 tv) 0)
+          (or (nth 2 tv) 0) (or (nth 3 tv) 0)
           (symbol-name (newsticker--age item))
           (newsticker--pos item)
           (newsticker--preformatted-contents item)
@@ -142,7 +143,8 @@
 
 (defun newst-sql--row-to-item (row)
   (list (nth 1 row) (nth 2 row) (nth 3 row)
-        (list (nth 4 row) (nth 5 row) (nth 6 row) (nth 7 row))
+        (list (or (nth 4 row) 0) (or (nth 5 row) 0)
+              (or (nth 6 row) 0) (or (nth 7 row) 0))
         (intern (nth 8 row))
         (nth 9 row) (nth 10 row) (nth 11 row)
         (let ((extra (nth 12 row)))

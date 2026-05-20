@@ -14,17 +14,15 @@
 
 ;; Transparent plainview paging for Newsticker backed by C++ feed_reader.
 ;; Requires newst-sql for the SQLite cache that feed_reader reads from.
+;; Requires newst-async-net for the async feed download queue.
 ;; Simply (require 'newst-jsonrpc) — pager advice is installed automatically
 ;; if the feed_reader binary is found.
-;;
-;; feed_reader is started lazily on first pager use, so it is safe to
-;; require this before newsticker is loaded.
 
 ;;; Code:
 
 (require 'jsonrpc)
-(require 'emacs-stdio-jsonrpc)
-(require 'async nil t)
+(require 'emacs-stdio-jsonrpc nil t)
+(require 'newst-async-net)
 
 (eval-when-compile
   (require 'newsticker nil t))
@@ -37,19 +35,8 @@
 (declare-function newsticker-hide-old-items "newst-plainview.el")
 (declare-function newsticker-hide-old-feed-header "newst-plainview.el")
 (declare-function newsticker-show-new-item-desc "newst-plainview.el")
-(declare-function newsticker--cache-replace-age "newst-backend.el")
-(declare-function newsticker--cache-add "newst-backend.el")
-(declare-function newsticker--cache-remove "newst-backend.el")
-(declare-function newsticker--cache-mark-expired "newst-backend.el")
-(declare-function newsticker--cache-get-feed "newst-backend.el")
-(declare-function newsticker--cache-save-feed "newst-backend.el")
-(declare-function newsticker--update-process-ids "newst-backend.el")
-(declare-function newsticker--buffer-set-uptodate "newst-plainview.el")
-(declare-function async-start "ext:async.el")
-(declare-function dom-by-tag "dom.el")
-(declare-function dom-tag "dom.el")
-(declare-function dom-text "dom.el")
-(declare-function dom-attr "dom.el")
+(declare-function emacs-stdio-jsonrpc-start-app "ext:emacs-stdio-jsonrpc.el")
+(declare-function emacs-stdio-jsonrpc-stop-app "ext:emacs-stdio-jsonrpc.el")
 
 ;; ----------------------------------------------------------------------
 ;; User options
@@ -96,212 +83,6 @@ Non-nil means the pager is active.")
     (apply #'message (concat "[jrpc-nw] " fmt) args)))
 
 ;; ----------------------------------------------------------------------
-;; Async feed download queue (concurrency-limit + async subprocess parsing)
-;; ----------------------------------------------------------------------
-
-(defcustom newst-jsonrpc-max-concurrent 3
-  "Maximum concurrent feed downloads."
-  :type 'integer :group 'newst-jsonrpc)
-
-(defvar newst-jsonrpc--active 0
-  "Number of currently active feed downloads.")
-
-(defvar newst-jsonrpc--queue nil
-  "Queue of (FEED-NAME URL) pending download.")
-
-;; --- Feed item extractor (runs in both async child and main thread) ---
-
-(defun newst-jsonrpc--mime-strip ()
-  "Remove MIME headers from current buffer."
-  (goto-char (point-min))
-  (when (search-forward "\n\n" nil t)
-    (delete-region (point-min) (point))))
-
-(defun newst-jsonrpc--extract-items (dom)
-  "Extract feed items from DOM.
-Returns (FEED-NAME FEED-TITLE (ITEM ...)) where each ITEM is
-\(TITLE DESCRIPTION LINK TIME AGE POS PREFORMATTED-CONTENTS
- PREFORMATTED-TITLE EXTRA).
-
-Time is (HIGH LOW MICRO PICO) as returned by `current-time'.
-This function is designed to run in both the main thread and an
-async child Emacs."
-  (let* ((top (if (eq 'rss (dom-tag dom)) dom
-                (or (car (dom-by-tag dom 'feed)) dom)))
-         (is-atom (eq 'feed (dom-tag top)))
-         (top-for-title (if (and (not is-atom)
-                                 (eq 'rss (dom-tag top)))
-                            (car (dom-by-tag top 'channel))
-                          top))
-         (feed-title (let ((t-el (dom-by-tag top-for-title 'title)))
-                       (when t-el (dom-text (car t-el)))))
-         (raw-items (if is-atom
-                        (dom-by-tag top 'entry)
-                      (dom-by-tag top 'item)))
-         (time (current-time))
-         (pos 0))
-    (list feed-title
-          (mapcar (lambda (item)
-                    (setq pos (1+ pos))
-                    (newst-jsonrpc--item-to-list item is-atom time pos))
-                  raw-items))))
-
-(defun newst-jsonrpc--item-to-list (item is-atom time pos)
-  (let* ((title-el (car (dom-by-tag item 'title)))
-         (title (if title-el (dom-text title-el) "[untitled]"))
-         (desc (if is-atom
-                   (or (let ((c (car (dom-by-tag item 'content))))
-                         (and c (dom-text c)))
-                       (let ((s (car (dom-by-tag item 'summary))))
-                         (and s (dom-text s))))
-                 (let ((d (car (dom-by-tag item 'description))))
-                   (and d (dom-text d)))))
-         (link (if is-atom
-                   (let ((l (car (dom-by-tag item 'link))))
-                     (if l (or (dom-attr l 'href) (dom-text l)) ""))
-                 (let ((l (car (dom-by-tag item 'link))))
-                   (if l (dom-text l) ""))))
-         (guid (if is-atom
-                   (let ((i (car (dom-by-tag item 'id))))
-                     (and i (dom-text i)))
-                 (let ((g (car (dom-by-tag item 'guid))))
-                   (and g (dom-text g)))))
-         (extra (when guid
-                  `((guid nil ,guid)))))
-    (list title (or desc "") link
-          time 'new pos nil nil extra)))
-
-;; --- Queue lifecycle ---
-
-(defun newst-jsonrpc--dequeue ()
-  "Start next queued download if under limit."
-  (when (and newst-jsonrpc--queue
-             (< newst-jsonrpc--active newst-jsonrpc-max-concurrent))
-    (let ((item (pop newst-jsonrpc--queue)))
-      (newst-jsonrpc--start-download (car item) (cadr item)))))
-
-;; --- Result processing ---
-
-(defun newst-jsonrpc--process-result (feed-name items)
-  "Add parsed ITEMS to in-memory cache and persist to SQLite."
-  (require 'newsticker)
-  (let ((name-symbol (intern feed-name))
-        (time (current-time)))
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'new 'obsolete-new)
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'old 'obsolete-old)
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'feed 'obsolete-old)
-    (let* ((feed-entry (or (assoc feed-name newsticker-url-list)
-                           (assoc feed-name newsticker-url-list-defaults)))
-           (feed-url (and feed-entry (nth 1 feed-entry))))
-      (setq newsticker--cache
-            (newsticker--cache-add
-             newsticker--cache name-symbol
-             (or (car items) feed-name) "" (or feed-url "")
-             time 'feed 0 nil)))
-    (dolist (item (cdr items))
-      (setq newsticker--cache
-            (newsticker--cache-add newsticker--cache name-symbol
-                                   (nth 0 item) (nth 1 item) (nth 2 item)
-                                   (nth 3 item) (nth 4 item) (nth 5 item)
-                                   (nth 8 item))))
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'obsolete-old 'deleteme)
-    (newsticker--cache-remove newsticker--cache name-symbol 'deleteme)
-    (if (not newsticker-keep-obsolete-items)
-        (newsticker--cache-remove newsticker--cache
-                                  name-symbol 'obsolete-new)
-      (setq newsticker--cache
-            (newsticker--cache-mark-expired
-             newsticker--cache name-symbol
-             'obsolete 'obsolete-expired
-             newsticker-obsolete-item-max-age))
-      (newsticker--cache-remove newsticker--cache
-                                name-symbol 'obsolete-expired)
-      (newsticker--cache-replace-age newsticker--cache
-                                     name-symbol 'obsolete-new 'obsolete))
-    (newsticker--update-process-ids)
-    (setq newsticker--latest-update-time (current-time))
-    (newsticker--cache-save-feed
-     (newsticker--cache-get-feed name-symbol))
-    (when (fboundp 'newsticker--buffer-set-uptodate)
-      (newsticker--buffer-set-uptodate nil))))
-
-;; --- Async download (via async-start) ---
-
-(defun newst-jsonrpc--async-download (feed-name url)
-  "Download and parse feed in async child process."
-  (cl-incf newst-jsonrpc--active)
-  (async-start
-   `(lambda ()
-      (require 'dom)
-      (let* ((url ,url)
-             (buf (url-retrieve-synchronously url)))
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (goto-char (point-min))
-            (when (search-forward "\n\n" nil t)
-              (delete-region (point-min) (point)))
-            (let ((dom (libxml-parse-xml-region (point-min) (point-max))))
-              (kill-buffer buf)
-              ;; Return (feed-title (item...)).  The caller wraps
-              ;; it with feed-name on receipt.
-              (cdr (newst-jsonrpc--extract-items dom)))))))
-   (lambda (items)
-     (when items
-       (newst-jsonrpc--process-result feed-name
-                                       (cons feed-name items)))
-     (setq newst-jsonrpc--active (1- newst-jsonrpc--active))
-     (newst-jsonrpc--dequeue))))
-
-;; --- Direct download fallback (uses url-retrieve in main thread) ---
-
-(defun newst-jsonrpc--direct-download (feed-name url)
-  "Download and parse feed via url-retrieve (main thread fallback)."
-  (let ((coding-system-for-read 'no-conversion))
-    (url-retrieve url 'newst-jsonrpc--direct-callback
-                  (list feed-name) t nil)))
-
-(defun newst-jsonrpc--direct-callback (_status feed-name)
-  "Callback for `newst-jsonrpc--direct-download'."
-  (let ((buf (current-buffer)))
-    (unwind-protect
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (newst-jsonrpc--mime-strip)
-            (let* ((dom (ignore-errors
-                          (libxml-parse-xml-region (point-min) (point-max))))
-                   (result (and dom (newst-jsonrpc--extract-items dom))))
-              (when result
-                (newst-jsonrpc--process-result feed-name
-                                                (cons feed-name result))))))
-      (setq newst-jsonrpc--active (1- newst-jsonrpc--active))
-      (newst-jsonrpc--dequeue))))
-
-;; --- Dispatch ---
-
-(defun newst-jsonrpc--start-download (feed-name url)
-  "Start download+parse for FEED-NAME from URL.
-Uses async-start if available, else url-retrieve."
-  (if (featurep 'async)
-      (newst-jsonrpc--async-download feed-name url)
-    (newst-jsonrpc--direct-download feed-name url)))
-
-;; --- Advice: intercept get-news-by-url to use queue ---
-
-(defun newst-jsonrpc-advice-get-news-by-url (_orig-fn feed-name url)
-  ":around advice for `newsticker--get-news-by-url'.
-Routes through async download queue instead of direct url-retrieve."
-  (if (< newst-jsonrpc--active newst-jsonrpc-max-concurrent)
-      (newst-jsonrpc--start-download feed-name url)
-    (push (list feed-name url) newst-jsonrpc--queue)
-    (newst-jsonrpc-debug "queued %s (active=%d queue=%d)"
-                          feed-name newst-jsonrpc--active
-                          (length newst-jsonrpc--queue))))
-
-;; ----------------------------------------------------------------------
 ;; feed_reader lifecycle (lazy start)
 ;; ----------------------------------------------------------------------
 
@@ -310,9 +91,9 @@ Routes through async download queue instead of direct url-retrieve."
   (let* ((dir (or newst-jsonrpc--load-dir default-directory))
           (bin (expand-file-name "build/feed_reader" dir))
           (db (if (and (boundp 'newsticker-dir) newsticker-dir)
-                 (expand-file-name "cache.db" newsticker-dir)
-               (expand-file-name "cache.db"
-                                 (locate-user-emacs-file "newsticker")))))
+                  (expand-file-name "cache.db" newsticker-dir)
+                (expand-file-name "cache.db"
+                                  (locate-user-emacs-file "newsticker")))))
     (condition-case err
         (progn
           (unless (file-exists-p bin)
@@ -543,10 +324,6 @@ Load previous feed's first page from feed_reader."
             #'newst-jsonrpc-advice-next-feed)
 (advice-add 'newsticker-previous-feed :around
             #'newst-jsonrpc-advice-prev-feed)
-
-;; Concurrent download queue + async parsing
-(advice-add 'newsticker--get-news-by-url :around
-            #'newst-jsonrpc-advice-get-news-by-url)
 
 (provide 'newst-jsonrpc)
 ;;; newst-jsonrpc.el ends here
