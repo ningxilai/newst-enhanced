@@ -1,3 +1,3 @@
 [submodule "deps/emacs-stdio-jsonrpc"]
 	path = deps/emacs-stdio-jsonrpc
-	url = https://github.com/ningxilai/emacs-stdio-jsonrpc
+	url = https://github.com/ningxilai/newst-enhanced
