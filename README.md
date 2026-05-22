@@ -113,3 +113,7 @@ Both automatically add `deps/emacs-stdio-jsonrpc/` to `load-path`.
 by **Andros Fenollosa** `<hi@andros.dev>`.  The queue management,
 timeout handling, and concurrent download pattern are derived from
 his original work.
+
+The pager-based offloading architecture was inspired by
+[LazyCat's proposal](https://emacs-china.org/t/topic/25811) for
+handling large files via external process pipelines.
