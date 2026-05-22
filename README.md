@@ -109,7 +109,7 @@ Both automatically add `deps/emacs-stdio-jsonrpc/` to `load-path`.
 
 ## Credits
 
-`newst-async-net` is based on [async-http-queue.el](https://andros.dev)
+`newst-async-net` is based on [async-http-queue.el](https://git.andros.dev/andros/async-http-queue-el)
 by **Andros Fenollosa** `<hi@andros.dev>`.  The queue management,
 timeout handling, and concurrent download pattern are derived from
 his original work.
