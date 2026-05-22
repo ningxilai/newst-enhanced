@@ -202,47 +202,47 @@ Time is (HIGH LOW MICRO PICO) as returned by `current-time'."
 Adapted from async-http-queue.el pattern: url-retrieve with
 timeout timer, concurrency tracking via newst-async-net--active."
   (cl-incf newst-async-net--active)
-  (ignore feed-name url)
-  (let* ((timeout-timer nil)
-         (callback-called nil)
-         (url-buffer
+  (let ((timeout-timer nil)
+        (callback-called nil)
+        (url-buffer nil))
+    (setq url-buffer
           (let ((coding-system-for-read 'no-conversion))
             (url-retrieve
              url
              (lambda (status)
-               (when timeout-timer
-                 (cancel-timer timeout-timer))
-               (unless callback-called
-                 (setq callback-called t)
-                 (let ((buf (current-buffer)))
-                   (unwind-protect
-                       (when (buffer-live-p buf)
-                         (with-current-buffer buf
-                           (let ((err-flag (plist-get status :error)))
-                             (if err-flag
-                                 (newst-async-net-debug
-                                  "download error %s: %S" url err-flag)
-                               (newst-async-net--mime-strip)
-                               (condition-case parse-err
-                                   (let* ((dom (libxml-parse-xml-region
-                                                (point-min) (point-max)))
-                                          (result (and dom
-                                                       (newst-async-net--extract-items
-                                                        dom))))
-                                     (when result
-                                       (newst-async-net--process-result
-                                        feed-name
-                                        (cons feed-name (cadr result)))))
-                                 (error
+                (when timeout-timer
+                  (cancel-timer timeout-timer))
+                (unless callback-called
+                  (setq callback-called t)
+                  (let ((buf (current-buffer)))
+                    (unwind-protect
+                        (when (buffer-live-p buf)
+                          (with-current-buffer buf
+                            (let ((err-flag (plist-get status :error)))
+                              (if err-flag
                                   (newst-async-net-debug
-                                   "parse error %s: %S" url parse-err))))))
-                     (condition-case nil
-                         (kill-buffer buf)
-                       (error nil)))
-                   (setq newst-async-net--active
-                         (1- newst-async-net--active))
-                   (newst-async-net--dequeue))))
-             nil t))))
+                                   "download error %s: %S" url err-flag)
+                                (newst-async-net--mime-strip)
+                                (condition-case parse-err
+                                    (let* ((dom (libxml-parse-xml-region
+                                                 (point-min) (point-max)))
+                                           (result (and dom
+                                                        (newst-async-net--extract-items
+                                                         dom))))
+                                      (when result
+                                        (newst-async-net--process-result
+                                         feed-name
+                                         (cons feed-name (cadr result)))))
+                                  (error
+                                   (newst-async-net-debug
+                                    "parse error %s: %S" url parse-err))))))
+                      (condition-case nil
+                          (kill-buffer buf)
+                        (error nil)))
+                    (setq newst-async-net--active
+                          (1- newst-async-net--active))
+                    (newst-async-net--dequeue))))
+              nil t))))
     (ignore timeout-timer callback-called url-buffer)
     (setq timeout-timer
           (run-at-time newst-async-net-timeout nil

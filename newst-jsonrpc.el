@@ -132,10 +132,19 @@ Non-nil means the pager is active.")
 ;; Core pager functions
 ;; ----------------------------------------------------------------------
 
+(defvar newst-jsonrpc-max-desc-length 2000
+  "Truncate item descriptions to this many characters.
+Set to nil for no truncation.")
+
 (defun newst-jsonrpc--json-to-item (json)
   "Convert JSON plist from feed_reader to Elisp item list."
   (list (plist-get json :title)
-        (plist-get json :description)
+        (let ((desc (plist-get json :description)))
+          (when desc
+            (if (and newst-jsonrpc-max-desc-length
+                     (> (length desc) newst-jsonrpc-max-desc-length))
+                (truncate-string-to-width desc newst-jsonrpc-max-desc-length)
+              desc)))
         (plist-get json :link)
         (append (plist-get json :time) nil)
         (intern (plist-get json :age))
@@ -209,69 +218,82 @@ Non-nil means the pager is active.")
 
 (defun newst-jsonrpc-next-page ()
   "Load next page of current feed.  Wrap to next feed at end."
-  (let ((new (+ newst-jsonrpc-offset
-                newst-jsonrpc-page-size)))
+  (let ((new (+ newst-jsonrpc-offset newst-jsonrpc-page-size)))
     (if (>= new newst-jsonrpc-total)
-        (condition-case nil
-            (newst-jsonrpc--next-feed)
-          (error nil))
-      (newst-jsonrpc-goto
-       newst-jsonrpc-feed-name new))))
+        (ignore-errors (newst-jsonrpc--next-feed))
+      (newst-jsonrpc-goto newst-jsonrpc-feed-name new))))
 
 (defun newst-jsonrpc-prev-page ()
   "Load previous page of current feed.  Wrap to prev feed at start."
-  (let ((new (- newst-jsonrpc-offset
-                newst-jsonrpc-page-size)))
+  (let ((new (- newst-jsonrpc-offset newst-jsonrpc-page-size)))
     (if (< new 0)
-        (condition-case nil
-            (newst-jsonrpc--prev-feed)
-          (error nil))
-      (newst-jsonrpc-goto
-       newst-jsonrpc-feed-name new))))
+        (ignore-errors (newst-jsonrpc--prev-feed))
+      (newst-jsonrpc-goto newst-jsonrpc-feed-name new))))
 
-(defun newst-jsonrpc--next-feed ()
-  "Load next feed's first page.  Cyclic through URL list."
-  (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
-         (cur (assoc-string newst-jsonrpc-feed-name feeds))
-         (next (cadr (member cur feeds))))
-    (unless next
-      (setq next (car feeds)))
+(defun newst-jsonrpc--adjacent-feed (feeds cur &optional prev)
+  "Return feed adjacent to CUR in FEEDS.
+When PREV is non-nil, return the preceding feed (reverse navigation)."
+  (let* ((seq (if prev (reverse feeds) feeds))
+         (tail (member cur seq))
+         (next (if (cdr tail) (cadr tail) (car seq))))
     (when next
       (newst-jsonrpc-goto (car next) 0)
       (point))))
 
+(defun newst-jsonrpc--next-feed ()
+  "Load next feed's first page.  Cyclic through URL list."
+  (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
+         (cur (assoc-string newst-jsonrpc-feed-name feeds)))
+    (when cur
+      (newst-jsonrpc--adjacent-feed feeds cur))))
+
 (defun newst-jsonrpc--prev-feed ()
   "Load previous feed's first page.  Cyclic through URL list."
   (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
-         (cur (assoc-string newst-jsonrpc-feed-name feeds))
-         (prev (cadr (member cur (reverse feeds)))))
-    (unless prev
-      (setq prev (car (last feeds))))
-    (when prev
-      (newst-jsonrpc-goto (car prev) 0)
-      (point))))
+         (cur (assoc-string newst-jsonrpc-feed-name feeds)))
+    (when cur
+      (newst-jsonrpc--adjacent-feed feeds cur 'prev))))
 
 ;; ----------------------------------------------------------------------
 ;; Pager advice
 ;; ----------------------------------------------------------------------
 
-(defun newst-jsonrpc-advice-insert-all (orig-fn)
+(defun newst-jsonrpc-advice-insert-all (_orig-fn)
   "Around advice for `newsticker--buffer-insert-all-items'.
 Start feed_reader lazily if needed, then load page from it.
-Fall back to ORIG-FN on error or empty DB."
+Show a placeholder buffer when feed_reader is unavailable, instead
+of falling through to ORIG-FN which inserts the entire cache."
   (if (not (newst-jsonrpc--ensure-started))
-      (funcall orig-fn)
+      (let ((buf (get-buffer-create "*newsticker*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert ";; feed_reader not started\n")
+            (insert ";; M-x newst-jsonrpc-start RET to start manually\n")
+            (insert ";; or check that build/feed_reader exists\n"))
+          (newsticker-mode)
+          (display-buffer buf)))
     (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
            (first (car feeds)))
       (if (null first)
           (user-error "No feeds configured")
-        (condition-case nil
+        (condition-case err
             (progn
               (newst-jsonrpc-goto (car first) 0)
               (when (and (null newst-jsonrpc-page-content)
                          (eq 0 newst-jsonrpc-total))
-                (funcall orig-fn)))
-          (error (funcall orig-fn)))))))
+                ;; feed exists but has 0 items — show empty page
+                (newst-jsonrpc--build-buffer)))
+          (error
+           (newst-jsonrpc-debug "page load failed: %S" err)
+           (let ((buf (get-buffer-create "*newsticker*")))
+             (with-current-buffer buf
+               (let ((inhibit-read-only t))
+                 (erase-buffer)
+                 (insert (format ";; feed_reader error: %s\n" err))
+                 (insert ";; check *feed_reader* process buffer for details\n"))
+               (newsticker-mode)
+               (display-buffer buf)))))))))
 
 (defun newst-jsonrpc-advice-next-item
     (orig-fn &optional do-not-wrap)
