@@ -47,7 +47,12 @@
   :group 'emacs-stdio-jsonrpc)
 
 (defcustom newst-jsonrpc-page-size 20
-  "Number of items per page in the paged plainview."
+  "Number of items to fetch when streaming more content."
+  :type 'integer
+  :group 'newst-jsonrpc)
+
+(defcustom newst-jsonrpc-stream-max-items 200
+  "Maximum items kept in the streaming buffer before trimming old ones."
   :type 'integer
   :group 'newst-jsonrpc)
 
@@ -119,7 +124,7 @@ KEY = (feed-name . offset) → VALUE = (items . total).")
 (defun newst-jsonrpc--cache-get (key)
   "Return cached PAGE-RESULT for KEY, or nil.
 Moves KEY to front of LRU list on access."
-  (when-let ((val (gethash key newst-jsonrpc--page-cache)))
+  (when-let* ((val (gethash key newst-jsonrpc--page-cache)))
     (setq newst-jsonrpc--cache-lru
           (cons key (delete key newst-jsonrpc--cache-lru)))
     val))
@@ -238,8 +243,8 @@ Set to nil for no truncation.")
             (throw 'found item)))))))
 
 (defun newst-jsonrpc--build-buffer ()
-  "Clear *newsticker* and insert current page.
-Leave point at the first item."
+  "Clear *newsticker* and insert all loaded items.
+Point at first item."
   (let ((buf (get-buffer "*newsticker*")))
     (unless buf (user-error "No *newsticker* buffer"))
     (with-current-buffer buf
@@ -247,61 +252,159 @@ Leave point at the first item."
             (sym (intern newst-jsonrpc-feed-name)))
         (erase-buffer)
         (set-buffer-modified-p nil)
-        (let ((fd (newst-jsonrpc--feed-descriptor sym)))
-          (when fd
-            (newsticker--buffer-insert-item fd sym)))
+        (when-let* ((fd (newst-jsonrpc--feed-descriptor sym)))
+          (newsticker--buffer-insert-item fd sym))
         (dolist (item newst-jsonrpc-page-content)
           (newsticker--buffer-insert-item item sym))
         (let ((p (point)))
           (insert "\n")
           (put-text-property p (point) 'hard t))
-        (newsticker--buffer-set-faces (point-min) (point-max))
-        (newsticker--buffer-set-invisibility (point-min) (point-max))
-        (newsticker-hide-all-desc)
-        (when newsticker-hide-old-items-in-newsticker-buffer
-          (newsticker-hide-old-items))
-        (when newsticker-hide-old-feed-header
-          (newsticker-hide-old-feed-header))
-        (when newsticker-show-descriptions-of-new-items
-          (newsticker-show-new-item-desc))
-        (goto-char (point-min))
-        ;; Position point at first visible item (skip feed header)
-        (newsticker--buffer-goto '(item))))))
+        (newst-jsonrpc--post-render)))
+    (goto-char (point-min))
+    (newsticker--buffer-goto '(item))))
+
+(defun newst-jsonrpc--post-render ()
+  "Apply face, invisibility, and hiding settings to current buffer."
+  (newsticker--buffer-set-faces (point-min) (point-max))
+  (newsticker--buffer-set-invisibility (point-min) (point-max))
+  (newsticker-hide-all-desc)
+  (when newsticker-hide-old-items-in-newsticker-buffer
+    (newsticker-hide-old-items))
+  (when newsticker-hide-old-feed-header
+    (newsticker-hide-old-feed-header))
+  (when newsticker-show-descriptions-of-new-items
+    (newsticker-show-new-item-desc)))
+
+(defun newst-jsonrpc--fetch-and-cache (feed-name offset limit)
+  "Return (ITEMS . TOTAL), fetching from pager and caching result."
+  (let ((key (cons feed-name offset)))
+    (or (newst-jsonrpc--cache-get key)
+        (newst-jsonrpc--cache-put
+         key
+         (newst-jsonrpc--fetch-page feed-name offset limit)))))
+
+(defun newst-jsonrpc--stream-append (new-items)
+  "Append NEW-ITEMS to the buffer and `newst-jsonrpc-page-content'.
+Trim from front if over `newst-jsonrpc-stream-max-items'.
+Point is preserved or moved to first item if a rebuild was needed."
+  (let* ((buf (get-buffer "*newsticker*"))
+         (sym (intern newst-jsonrpc-feed-name))
+         (over 0))
+    (setq newst-jsonrpc-page-content
+          (append newst-jsonrpc-page-content new-items))
+    ;; Trim from front if over limit
+    (let ((total (length newst-jsonrpc-page-content)))
+      (when (> total newst-jsonrpc-stream-max-items)
+        (setq over (- total newst-jsonrpc-stream-max-items)
+              newst-jsonrpc-page-content (nthcdr over newst-jsonrpc-page-content)
+              newst-jsonrpc-offset (+ newst-jsonrpc-offset over))))
+    (if (> over 0)
+        ;; Rebuild from scratch after trimming
+        (newst-jsonrpc--build-buffer)
+      ;; No trim — append incrementally
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (forward-line -1)
+          (delete-region (point) (point-max))
+          (dolist (item new-items)
+            (newsticker--buffer-insert-item item sym))
+          (let ((p (point)))
+            (insert "\n")
+            (put-text-property p (point) 'hard t))
+          (newst-jsonrpc--post-render))))))
+
+(defun newst-jsonrpc--stream-prepend (new-items)
+  "Prepend NEW-ITEMS to the buffer and `newst-jsonrpc-page-content'.
+Updates `newst-jsonrpc-offset'.  Trim from end if over limit.
+Point is preserved or moved to first item if a rebuild was needed."
+  (let* ((buf (get-buffer "*newsticker*"))
+         (sym (intern newst-jsonrpc-feed-name))
+         (over 0))
+    (setq newst-jsonrpc-offset (- newst-jsonrpc-offset (length new-items))
+          newst-jsonrpc-page-content (append new-items newst-jsonrpc-page-content))
+    ;; Trim from end if over limit
+    (let ((total (length newst-jsonrpc-page-content)))
+      (when (> total newst-jsonrpc-stream-max-items)
+        (setq over (- total newst-jsonrpc-stream-max-items)
+              newst-jsonrpc-page-content (butlast newst-jsonrpc-page-content over))))
+    (if (> over 0)
+        ;; Rebuild from scratch after trimming
+        (newst-jsonrpc--build-buffer)
+      ;; No trim — prepend incrementally
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-min))
+          (if (newsticker--buffer-goto '(item))
+              (dolist (item new-items)
+                (newsticker--buffer-insert-item item sym))
+            ;; No items yet — append at end
+            (dolist (item new-items)
+              (newsticker--buffer-insert-item item sym))
+            (let ((p (point)))
+              (insert "\n")
+              (put-text-property p (point) 'hard t)))
+          (newst-jsonrpc--post-render))))))
 
 (defun newst-jsonrpc-goto (feed-name offset)
-  "Switch to FEED-NAME at OFFSET.
-Returns `t' if page was served from cache, nil otherwise."
+  "Switch to FEED-NAME at OFFSET (full reset, not streaming)."
   (setq newst-jsonrpc-feed-name feed-name
         newst-jsonrpc-offset offset)
-  (let* ((key (cons feed-name offset))
-         (cached (newst-jsonrpc--cache-get key))
-         (from-cache (not (null cached)))
-         (result (or cached
-                     (newst-jsonrpc--cache-put
-                      key
-                      (newst-jsonrpc--fetch-page
-                       feed-name offset
-                       newst-jsonrpc-page-size))))
+  (let* ((result (newst-jsonrpc--fetch-and-cache
+                  feed-name offset newst-jsonrpc-page-size))
          (items (car result))
          (total (cdr result)))
     (setq newst-jsonrpc-total total
           newst-jsonrpc-page-content items)
-    (newst-jsonrpc--build-buffer)
-    from-cache))
+    (newst-jsonrpc--build-buffer)))
+
+(defun newst-jsonrpc--pos-at-offset (target-offset)
+  "Move point to the first item whose offset is TARGET-OFFSET.
+Start searching from the first item in the buffer."
+  (goto-char (point-min))
+  (when (newsticker--buffer-goto '(item))
+    (let ((current-offset newst-jsonrpc-offset))
+      (while (and (< current-offset target-offset)
+                  (newsticker--buffer-goto '(item) nil t))
+        (setq current-offset (1+ current-offset))))))
 
 (defun newst-jsonrpc-next-page ()
-  "Load next page of current feed.  Wrap to next feed at end."
-  (let ((new (+ newst-jsonrpc-offset newst-jsonrpc-page-size)))
-    (if (>= new newst-jsonrpc-total)
-        (ignore-errors (newst-jsonrpc--next-feed))
-      (newst-jsonrpc-goto newst-jsonrpc-feed-name new))))
+  "Stream next chunk: append items to buffer.
+Wraps to next feed at end."
+  (let ((buf-end (+ newst-jsonrpc-offset (length newst-jsonrpc-page-content))))
+    (if (>= buf-end newst-jsonrpc-total)
+        (progn
+          (newst-jsonrpc--next-feed)
+          (newsticker--buffer-goto '(item)))
+      (let* ((result (newst-jsonrpc--fetch-and-cache
+                      newst-jsonrpc-feed-name buf-end
+                      newst-jsonrpc-page-size))
+             (new-items (car result))
+             (new-total (cdr result)))
+        (setq newst-jsonrpc-total new-total)
+        (newst-jsonrpc--stream-append new-items)
+        ;; Position at first new item (offset buf-end)
+        (newst-jsonrpc--pos-at-offset buf-end)))))
 
 (defun newst-jsonrpc-prev-page ()
-  "Load previous page of current feed.  Wrap to prev feed at start."
-  (let ((new (- newst-jsonrpc-offset newst-jsonrpc-page-size)))
-    (if (< new 0)
-        (ignore-errors (newst-jsonrpc--prev-feed))
-      (newst-jsonrpc-goto newst-jsonrpc-feed-name new))))
+  "Stream previous chunk: prepend items to buffer.
+Wraps to prev feed at start."
+  (let ((buf-start newst-jsonrpc-offset))
+    (if (<= buf-start 0)
+        (progn
+          (newst-jsonrpc--prev-feed)
+          (newsticker--buffer-goto '(item)))
+      (let* ((prev-offset (max 0 (- buf-start newst-jsonrpc-page-size)))
+             (chunk-size (- buf-start prev-offset))
+             (result (newst-jsonrpc--fetch-and-cache
+                      newst-jsonrpc-feed-name prev-offset chunk-size))
+             (new-items (car result))
+             (new-total (cdr result)))
+        (setq newst-jsonrpc-total new-total)
+        (newst-jsonrpc--stream-prepend new-items)
+        ;; Position at first new item (offset prev-offset)
+        (goto-char (point-min))
+        (newsticker--buffer-goto '(item))))))
 
 (defun newst-jsonrpc--adjacent-feed (feeds cur &optional prev)
   "Return feed adjacent to CUR in FEEDS.
@@ -384,7 +487,7 @@ When at last item, load next page from pager."
 When at first item, load previous page from pager."
   (if (not newst-jsonrpc-conn)
       (funcall orig-fn do-not-wrap)
-    (if (save-excursion (newsticker--buffer-goto '(item) nil t))
+    (if (save-excursion (newsticker--buffer-goto '(item) t t))
         (funcall orig-fn do-not-wrap)
       (newst-jsonrpc-prev-page))))
 
