@@ -20,6 +20,8 @@
 
 ;;; Code:
 
+(require 'newst-sql)
+
 (eval-when-compile
   (require 'newsticker nil t))
 

@@ -23,6 +23,7 @@
 (require 'jsonrpc)
 (require 'emacs-stdio-jsonrpc nil t)
 (require 'newst-async-net)
+(require 'newst-sql)
 
 (eval-when-compile
   (require 'newsticker nil t))
