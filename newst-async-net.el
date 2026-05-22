@@ -10,6 +10,10 @@
 
 ;; SPDX-License-Identifier: MIT
 
+;; Based on async-http-queue.el by Andros Fenollosa <hi@andros.dev>
+;; (https://andros.dev).  The queue management, timeout handling, and
+;; concurrent download pattern are derived from his original work.
+
 ;;; Commentary:
 
 ;; Concurrent feed download queue for Newsticker using url-retrieve
