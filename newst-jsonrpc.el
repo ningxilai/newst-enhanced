@@ -20,6 +20,18 @@
 
 ;;; Code:
 
+;; Add source and bundled deps to load-path so all .el files are
+;; found when loading from source (e.g. M-x load-file or emacs -l).
+(let ((dir (or (when load-file-name
+                 (file-name-directory load-file-name))
+               (when buffer-file-name
+                 (file-name-directory buffer-file-name))
+               default-directory)))
+  (dolist (sub '("." "deps/emacs-stdio-jsonrpc"))
+    (let ((p (expand-file-name sub dir)))
+      (when (file-directory-p p)
+        (add-to-list 'load-path p)))))
+
 (require 'jsonrpc)
 (require 'emacs-stdio-jsonrpc nil t)
 (require 'newst-async-net)
