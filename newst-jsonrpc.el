@@ -103,6 +103,47 @@ Non-nil means the pager is active.")
     (apply #'message (concat "[jrpc-nw] " fmt) args)))
 
 ;; ----------------------------------------------------------------------
+;; Page cache (LRU, keeps recently viewed pages in memory)
+;; ----------------------------------------------------------------------
+
+(defconst newst-jsonrpc--page-cache-size 20
+  "Maximum number of pages to keep in the LRU cache.")
+
+(defvar newst-jsonrpc--page-cache (make-hash-table :test 'equal)
+  "Hash table of cached pages.
+KEY = (feed-name . offset) → VALUE = (items . total).")
+
+(defvar newst-jsonrpc--cache-lru '()
+  "List of cache keys ordered by most recent use (MRU first).")
+
+(defun newst-jsonrpc--cache-get (key)
+  "Return cached PAGE-RESULT for KEY, or nil.
+Moves KEY to front of LRU list on access."
+  (when-let ((val (gethash key newst-jsonrpc--page-cache)))
+    (setq newst-jsonrpc--cache-lru
+          (cons key (delete key newst-jsonrpc--cache-lru)))
+    val))
+
+(defun newst-jsonrpc--cache-put (key val)
+  "Store VAL under KEY, evicting LRU entries when over limit.
+Returns VAL so callers can use it in `or' chains."
+  (puthash key val newst-jsonrpc--page-cache)
+  (setq newst-jsonrpc--cache-lru
+        (cons key (delete key newst-jsonrpc--cache-lru)))
+  (while (> (hash-table-count newst-jsonrpc--page-cache)
+            newst-jsonrpc--page-cache-size)
+    (let ((lru (car (last newst-jsonrpc--cache-lru))))
+      (remhash lru newst-jsonrpc--page-cache)
+      (setq newst-jsonrpc--cache-lru
+            (delete lru newst-jsonrpc--cache-lru))))
+  val)
+
+(defun newst-jsonrpc--cache-clear ()
+  "Clear all cached pages."
+  (clrhash newst-jsonrpc--page-cache)
+  (setq newst-jsonrpc--cache-lru nil))
+
+;; ----------------------------------------------------------------------
 ;; pager lifecycle (lazy start)
 ;; ----------------------------------------------------------------------
 
@@ -141,7 +182,8 @@ Non-nil means the pager is active.")
           newst-jsonrpc-feed-name nil
           newst-jsonrpc-offset 0
           newst-jsonrpc-total 0
-          newst-jsonrpc-page-content nil)))
+          newst-jsonrpc-page-content nil)
+    (newst-jsonrpc--cache-clear)))
 
 (defun newst-jsonrpc--ensure-started ()
   "Start pager if not already running.  Return t if running."
@@ -196,7 +238,8 @@ Set to nil for no truncation.")
             (throw 'found item)))))))
 
 (defun newst-jsonrpc--build-buffer ()
-  "Clear *newsticker* and insert current page."
+  "Clear *newsticker* and insert current page.
+Leave point at the first item."
   (let ((buf (get-buffer "*newsticker*")))
     (unless buf (user-error "No *newsticker* buffer"))
     (with-current-buffer buf
@@ -220,21 +263,31 @@ Set to nil for no truncation.")
         (when newsticker-hide-old-feed-header
           (newsticker-hide-old-feed-header))
         (when newsticker-show-descriptions-of-new-items
-          (newsticker-show-new-item-desc)))
-      (goto-char (point-min)))))
+          (newsticker-show-new-item-desc))
+        (goto-char (point-min))
+        ;; Position point at first visible item (skip feed header)
+        (newsticker--buffer-goto '(item))))))
 
 (defun newst-jsonrpc-goto (feed-name offset)
-  "Switch to FEED-NAME at OFFSET."
+  "Switch to FEED-NAME at OFFSET.
+Returns `t' if page was served from cache, nil otherwise."
   (setq newst-jsonrpc-feed-name feed-name
         newst-jsonrpc-offset offset)
-  (let* ((result (newst-jsonrpc--fetch-page
-                  feed-name offset
-                  newst-jsonrpc-page-size))
+  (let* ((key (cons feed-name offset))
+         (cached (newst-jsonrpc--cache-get key))
+         (from-cache (not (null cached)))
+         (result (or cached
+                     (newst-jsonrpc--cache-put
+                      key
+                      (newst-jsonrpc--fetch-page
+                       feed-name offset
+                       newst-jsonrpc-page-size))))
          (items (car result))
          (total (cdr result)))
     (setq newst-jsonrpc-total total
           newst-jsonrpc-page-content items)
-    (newst-jsonrpc--build-buffer)))
+    (newst-jsonrpc--build-buffer)
+    from-cache))
 
 (defun newst-jsonrpc-next-page ()
   "Load next page of current feed.  Wrap to next feed at end."
