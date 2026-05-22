@@ -1,4 +1,4 @@
-;;; newst-jsonrpc.el --- Plainview pager with feed_reader for Newsticker  -*- lexical-binding: t; -*-
+;;; newst-jsonrpc.el --- Plainview pager with pager for Newsticker  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026
 
@@ -12,11 +12,11 @@
 
 ;;; Commentary:
 
-;; Transparent plainview paging for Newsticker backed by C++ feed_reader.
-;; Requires newst-sql for the SQLite cache that feed_reader reads from.
+;; Transparent plainview paging for Newsticker backed by C++ pager.
+;; Requires newst-sql for the SQLite cache that pager reads from.
 ;; Requires newst-async-net for the async feed download queue.
 ;; Simply (require 'newst-jsonrpc) — pager advice is installed automatically
-;; if the feed_reader binary is found.
+;; if the pager binary is found.
 
 ;;; Code:
 
@@ -43,7 +43,7 @@
 ;; ----------------------------------------------------------------------
 
 (defgroup newst-jsonrpc nil
-  "Newsticker plainview pager via feed_reader."
+  "Newsticker plainview pager via pager."
   :group 'emacs-stdio-jsonrpc)
 
 (defcustom newst-jsonrpc-page-size 20
@@ -60,7 +60,7 @@
   "Directory where newst-jsonrpc.el was loaded from.")
 
 (defvar newst-jsonrpc-conn nil
-  "JSON-RPC connection to feed_reader subprocess.
+  "JSON-RPC connection to pager subprocess.
 Non-nil means the pager is active.")
 
 (defvar newst-jsonrpc-feed-name nil
@@ -83,13 +83,13 @@ Non-nil means the pager is active.")
     (apply #'message (concat "[jrpc-nw] " fmt) args)))
 
 ;; ----------------------------------------------------------------------
-;; feed_reader lifecycle (lazy start)
+;; pager lifecycle (lazy start)
 ;; ----------------------------------------------------------------------
 
 (defun newst-jsonrpc-start ()
-  "Start feed_reader subprocess.  Return t on success."
+  "Start pager subprocess.  Return t on success."
   (let* ((dir (or newst-jsonrpc--load-dir default-directory))
-          (bin (expand-file-name "build/feed_reader" dir))
+          (bin (expand-file-name "build/pager" dir))
           (db (if (and (boundp 'newsticker-dir) newsticker-dir)
                   (expand-file-name "cache.db" newsticker-dir)
                 (expand-file-name "cache.db"
@@ -97,26 +97,26 @@ Non-nil means the pager is active.")
     (condition-case err
         (progn
           (unless (file-exists-p bin)
-            (error "feed_reader binary not found at %s" bin))
+            (error "pager binary not found at %s" bin))
           (let ((conn (emacs-stdio-jsonrpc-start-app
-                       "feed_reader" bin (list db)))
+                       "pager" bin (list db)))
                 (proc nil))
             (setq proc (ignore-errors (jsonrpc--process conn)))
             (unless (and proc (process-live-p proc))
-              (emacs-stdio-jsonrpc-stop-app "feed_reader")
-              (error "feed_reader process died immediately"))
+              (emacs-stdio-jsonrpc-stop-app "pager")
+              (error "pager process died immediately"))
             (setq newst-jsonrpc-conn conn)
             (newst-jsonrpc-debug
-             "feed_reader started: %s DB=%s" (file-name-nondirectory bin) db)
+             "pager started: %s DB=%s" (file-name-nondirectory bin) db)
             t))
       (error
-       (newst-jsonrpc-debug "feed_reader start failed: %S" err)
+       (newst-jsonrpc-debug "pager start failed: %S" err)
        nil))))
 
 (defun newst-jsonrpc-stop ()
-  "Stop feed_reader subprocess."
+  "Stop pager subprocess."
   (when newst-jsonrpc-conn
-    (emacs-stdio-jsonrpc-stop-app "feed_reader")
+    (emacs-stdio-jsonrpc-stop-app "pager")
     (setq newst-jsonrpc-conn nil
           newst-jsonrpc-feed-name nil
           newst-jsonrpc-offset 0
@@ -124,7 +124,7 @@ Non-nil means the pager is active.")
           newst-jsonrpc-page-content nil)))
 
 (defun newst-jsonrpc--ensure-started ()
-  "Start feed_reader if not already running.  Return t if running."
+  "Start pager if not already running.  Return t if running."
   (or newst-jsonrpc-conn
       (newst-jsonrpc-start)))
 
@@ -137,7 +137,7 @@ Non-nil means the pager is active.")
 Set to nil for no truncation.")
 
 (defun newst-jsonrpc--json-to-item (json)
-  "Convert JSON plist from feed_reader to Elisp item list."
+  "Convert JSON plist from pager to Elisp item list."
   (list (plist-get json :title)
         (let ((desc (plist-get json :description)))
           (when desc
@@ -260,17 +260,17 @@ When PREV is non-nil, return the preceding feed (reverse navigation)."
 
 (defun newst-jsonrpc-advice-insert-all (_orig-fn)
   "Around advice for `newsticker--buffer-insert-all-items'.
-Start feed_reader lazily if needed, then load page from it.
-Show a placeholder buffer when feed_reader is unavailable, instead
+Start pager lazily if needed, then load page from it.
+Show a placeholder buffer when pager is unavailable, instead
 of falling through to ORIG-FN which inserts the entire cache."
   (if (not (newst-jsonrpc--ensure-started))
       (let ((buf (get-buffer-create "*newsticker*")))
         (with-current-buffer buf
           (let ((inhibit-read-only t))
             (erase-buffer)
-            (insert ";; feed_reader not started\n")
+            (insert ";; pager not started\n")
             (insert ";; M-x newst-jsonrpc-start RET to start manually\n")
-            (insert ";; or check that build/feed_reader exists\n"))
+            (insert ";; or check that build/pager exists\n"))
           (newsticker-mode)
           (display-buffer buf)))
     (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
@@ -290,15 +290,15 @@ of falling through to ORIG-FN which inserts the entire cache."
              (with-current-buffer buf
                (let ((inhibit-read-only t))
                  (erase-buffer)
-                 (insert (format ";; feed_reader error: %s\n" err))
-                 (insert ";; check *feed_reader* process buffer for details\n"))
+                 (insert (format ";; pager error: %s\n" err))
+                 (insert ";; check *pager* process buffer for details\n"))
                (newsticker-mode)
                (display-buffer buf)))))))))
 
 (defun newst-jsonrpc-advice-next-item
     (orig-fn &optional do-not-wrap)
   "Around advice for `newsticker-next-item'.
-When at last item, load next page from feed_reader."
+When at last item, load next page from pager."
   (if (not newst-jsonrpc-conn)
       (funcall orig-fn do-not-wrap)
     (if (save-excursion (newsticker--buffer-goto '(item)))
@@ -308,7 +308,7 @@ When at last item, load next page from feed_reader."
 (defun newst-jsonrpc-advice-prev-item
     (orig-fn &optional do-not-wrap)
   "Around advice for `newsticker-previous-item'.
-When at first item, load previous page from feed_reader."
+When at first item, load previous page from pager."
   (if (not newst-jsonrpc-conn)
       (funcall orig-fn do-not-wrap)
     (if (save-excursion (newsticker--buffer-goto '(item) nil t))
@@ -317,14 +317,14 @@ When at first item, load previous page from feed_reader."
 
 (defun newst-jsonrpc-advice-next-feed (orig-fn)
   "Around advice for `newsticker-next-feed'.
-Load next feed's first page from feed_reader."
+Load next feed's first page from pager."
   (if (not newst-jsonrpc-conn)
       (funcall orig-fn)
     (newst-jsonrpc--next-feed)))
 
 (defun newst-jsonrpc-advice-prev-feed (orig-fn)
   "Around advice for `newsticker-previous-feed'.
-Load previous feed's first page from feed_reader."
+Load previous feed's first page from pager."
   (if (not newst-jsonrpc-conn)
       (funcall orig-fn)
     (newst-jsonrpc--prev-feed)))
@@ -333,7 +333,7 @@ Load previous feed's first page from feed_reader."
 ;; Auto-install pager advice on load
 ;; ----------------------------------------------------------------------
 
-;; Install advice unconditionally.  feed_reader is started lazily on
+;; Install advice unconditionally.  pager is started lazily on
 ;; first page load (see `newst-jsonrpc-advice-insert-all').
 ;; Safe even if newsticker is not yet loaded.
 (advice-add 'newsticker--buffer-insert-all-items :around
