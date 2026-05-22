@@ -1,142 +1,143 @@
-# newst-enhanced — C++ Pager Refactoring
+# newst-enhanced
 
-## Goal
-Refactor `feed_reader.cpp` into a clean, parallel `pager` binary that fully
-leverages C I/O and eliminates all dead code.
+Enhanced Newsticker: async feed download, SQLite cache,
+streaming pager-based plainview.
 
-## Summary of Changes
-
-1. **Rename**: `feed_reader` → `pager` (binary, source, JSON-RPC methods stay
-   compatible).
-2. **Remove dead code**: empty waker, unused includes (`<thread>`, `<atomic>`),
-   `g_quit` spin-loop, duplicate auto-open block.
-3. **Single SQL round-trip**: replace sequential COUNT + SELECT with a single
-   query using `COUNT(*) OVER() AS total`.
-4. **RAII for sqlite3**: `sqlite3_stmt` auto-finalize via destructor.
-5. **Parallel pre-fetch**: background thread pre-loads the next page while the
-   user views the current one.
-6. **Proper blocking I/O**: replace the 50ms sleep-poll with `poll()` on stdin
-   so the process wakes only when data arrives.
-7. **Modular file structure**: split into `pager.cpp`, `db.h`/`db.cpp`,
-   `utf8.h`/`utf8.cpp`.
-
-## File Layout After Refactoring
+## File Layout
 
 ```
-src/
-  pager.cpp      — main(), JSON-RPC registration
-  db.h           — DatabaseManager class (RAII, parallel pre-fetch)
-  db.cpp         — DatabaseManager implementation
-  utf8.h         — sanitize_utf8 declaration
-  utf8.cpp       — sanitize_utf8 implementation
-include/         — (existing, for jsonrpc.hpp)
-deps/            — (existing, emacs-stdio-jsonrpc)
+.
+├── CMakeLists.txt                 — builds pager (C++17)
+├── README.md
+├── AGENTS.md
+├── newst-jsonrpc.el               — pager-based plainview (entry point)
+├── newst-async-net.el             — concurrent feed download queue
+├── newst-sql.el                   — SQLite cache backend
+├── src/
+│   ├── pager.cpp                  — main(), JSON-RPC registration
+│   ├── db.h / db.cpp              — DatabaseManager (RAII, pre-fetch)
+│   └── utf8.h / utf8.cpp          — sanitize_utf8
+├── deps/
+│   └── emacs-stdio-jsonrpc/       — JSON-RPC 2.0 stdio transport
+│       ├── emacs-stdio-jsonrpc.el — Elisp side
+│       ├── include/jsonrpc.hpp    — C++ Conn class
+│       └── CMakeLists.txt
+├── include/                       — json.hpp (nlohmann)
+└── test/
+    ├── test-emacs-stdio-jsonrpc-newsticker.el
+    └── test-emacs-stdio-jsonrpc-newsticker-sqlite.el
 ```
 
-## JSON-RPC Interface (unchanged)
+## Components
 
-| Method | Params | Returns |
-|--------|--------|---------|
-| `open` | `{path: string}` | `true` |
-| `list_feeds` | `{}` | `[{name, count}]` |
-| `get_page` | `{feed, offset?, limit?}` | `{items, total, offset, count}` |
-| `exit` | `{}` | notification |
+### C++ — `pager` binary
 
-## DatabaseManager API
+JSON-RPC 2.0 server over stdio. Reads from the same SQLite database
+that `newst-sql` writes to.
 
-```cpp
-class DatabaseManager {
-public:
-    explicit DatabaseManager(const std::string& path);
-    ~DatabaseManager();
+| Method       | Params                         | Returns                           |
+|--------------|--------------------------------|-----------------------------------|
+| `open`       | `{path: string}`               | `true`                            |
+| `list_feeds` | `{}`                           | `[{name, count}]`                 |
+| `get_page`   | `{feed, offset?, limit?}`      | `{items, total, offset, count}`   |
+| `exit`       | `{}`                           | notification                      |
 
-    // Non-copyable, non-movable
-    DatabaseManager(const DatabaseManager&) = delete;
-    DatabaseManager& operator=(const DatabaseManager&) = delete;
+Key implementation:
+- **`COUNT(*) OVER() AS total`** — single round-trip for pagination
+- **`StmtGuard`** — RAII wrapper for `sqlite3_stmt` (auto-finalize)
+- **Parallel pre-fetch** — `std::async` loads next page in background
+- **Sleep-based main loop** (50ms) — reader thread uses `poll(STDIN_FILENO, 100ms)`
+  internally; pipe-based waker hit `std::cin`/`poll()` buffering interaction
 
-    jsonrpc::json list_feeds();
-    PageResult get_page(const std::string& feed, int offset, int limit);
+### `newst-sql.el` — SQLite cache
 
-    // Parallel pre-fetch: start background load of next page.
-    // The result can be retrieved or discarded when the user turns the page.
-    void prefetch_page(const std::string& feed, int offset, int limit);
-    std::optional<PageResult> consume_prefetched();
+Overrides three newsticker cache functions with SQLite:
 
-private:
-    sqlite3* db_ = nullptr;
-    // Pre-fetch state
-    std::mutex prefetch_mutex_;
-    std::optional<PageResult> prefetched_;
-    std::future<void> prefetch_future_;
-};
+| Override target                   | Handler            |
+|-----------------------------------|--------------------|
+| `newsticker--cache-save`          | `newst-sql-save`   |
+| `newsticker--cache-read`          | `newst-sql-read`   |
+| `newsticker--cache-save-feed`     | `newst-sql-save-feed` |
+
+Uses Emacs 29's built-in `sqlite.el`. Database at `newsticker-dir/cache.db`.
+Auto-migrates from old prin1 files on first load (creates `.sqlite-migrated`
+sentinel). WAL mode + synchronous=NORMAL for concurrent read access by pager.
+
+### `newst-async-net.el` — Async download queue
+
+Concurrent feed download via `url-retrieve` with timeout timers.
+Queue management derived from `async-http-queue.el` by Andros Fenollosa.
+
+- Max concurrent downloads: `newst-async-net-max-concurrent` (default 3)
+- Per-feed timeout: `newst-async-net-timeout` (default 30s)
+- Installs `:around` advice on `newsticker--get-news-by-url`
+- Stores results into `newsticker--cache` → persisted by `newst-sql`
+
+### `newst-jsonrpc.el` — Streaming pager plainview
+
+The user-facing entry point. Installs `:around` advice on:
+
+| Target function                          | Handler                                  |
+|------------------------------------------|------------------------------------------|
+| `newsticker--buffer-insert-all-items`    | `newst-jsonrpc-advice-insert-all`        |
+| `newsticker-next-item`                   | `newst-jsonrpc-advice-next-item`         |
+| `newsticker-previous-item`               | `newst-jsonrpc-advice-prev-item`         |
+| `newsticker-next-feed`                   | `newst-jsonrpc-advice-next-feed`         |
+| `newsticker-previous-feed`               | `newst-jsonrpc-advice-prev-feed`         |
+
+**Streaming buffer model** — items are appended/prepended without erasing:
+- "n" at last item → appends next chunk to buffer end
+- "p" at first item → prepends previous chunk at buffer start
+- Buffer capped at `newst-jsonrpc-stream-max-items` (default 200), trims far end
+- **LRU page cache** (20 entries) — previously viewed pages restore instantly
+
+**Lazy pager start** — first `newsticker-plainview` call starts the `pager`
+subprocess automatically. Binary auto-detected relative to load directory
+(or set `newst-jsonrpc-pager-path` explicitly).
+
+**Load-path auto-setup** — when loaded via `load-file` or `emacs -l`,
+adds source directory and `deps/emacs-stdio-jsonrpc/` to `load-path`.
+
+## Dependency Chain
+
 ```
-
-## Key Implementation Details
-
-### Single SQL query for get_page
-```sql
-SELECT title, description, link,
-       time_high, time_low, time_micro, time_pico,
-       age, item_pos, preformatted_contents, preformatted_title,
-       extra_elements, guid,
-       COUNT(*) OVER() AS total
-FROM items WHERE feed_name = ?
-ORDER BY item_pos LIMIT ? OFFSET ?
+(require 'newst-jsonrpc)
+  → (require 'newst-async-net)
+      → (require 'newst-sql)
+          → (require 'sqlite)        ; built-in
+  → (require 'jsonrpc)               ; built-in
+  → (require 'emacs-stdio-jsonrpc)   ; bundled in deps/
 ```
-
-### RAII Statement Guard
-```cpp
-struct StmtGuard {
-    sqlite3_stmt* stmt;
-    ~StmtGuard() { if (stmt) sqlite3_finalize(stmt); }
-    StmtGuard(const StmtGuard&) = delete;
-    StmtGuard& operator=(const StmtGuard&) = delete;
-};
-```
-
-### Main Loop
-The reader thread (inside `jsonrpc::Conn`) already uses `poll(STDIN_FILENO, 100ms)`
-internally. The main thread's job is simply to drain the message queue:
-
-```cpp
-while (!stopped) {
-    server.process_queue();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-}
-```
-
-A pipe-based waker was evaluated but hit a `std::cin`/`poll()` buffering
-interaction: `std::cin`'s filebuf can consume data from the fd before `poll()`
-detects it. The simple sleep-loop avoids this entirely and adds negligible
-latency (the reader thread uses a 100ms poll timeout, so the maximum message
-processing delay is 100ms + 50ms = 150ms).
-
-### Parallel Pre-fetch
-```cpp
-void DatabaseManager::prefetch_page(const std::string& feed, int offset, int limit) {
-    std::lock_guard lock(prefetch_mutex_);
-    if (prefetch_future_.valid()) {
-        // Wait for previous pre-fetch to finish (should be fast)
-        prefetch_future_.wait();
-    }
-    prefetch_future_ = std::async(std::launch::async, [this, feed, offset, limit] {
-        auto result = do_get_page(feed, offset, limit);  // shared db_ access
-        std::lock_guard lock2(prefetch_mutex_);
-        prefetched_ = result;
-    });
-}
-```
-
-Note: SQLite in WAL mode supports concurrent reads. The `db_` handle must be
-opened with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX`
-or use a separate read-only connection for the background thread.
-
-## UTF-8 Sanitization
-Keep the existing `sanitize_utf8()` function — it correctly handles all edge
-cases. Move it to a separate `utf8.h`/`utf8.cpp` for cleanliness.
 
 ## Build
-Update `CMakeLists.txt`:
-- Target name changes from `feed_reader` to `pager`
-- Source list: `src/pager.cpp src/db.cpp src/utf8.cpp`
-- No new dependencies required beyond sqlite3 and emacs-stdio-jsonrpc
+
+```sh
+cmake -B build
+cmake --build build
+```
+
+No new dependencies beyond sqlite3 headers and emacs-stdio-jsonrpc (bundled).
+
+## Usage
+
+```elisp
+;; init.el
+(require 'newsticker)
+(require 'newst-jsonrpc)
+```
+
+```
+M-x newsticker-start RET
+M-x newsticker-plainview RET
+```
+
+Or auto-open:
+
+```elisp
+(add-hook 'newsticker-start-hook #'newsticker-plainview)
+```
+
+## Credits
+
+`newst-async-net` is based on [async-http-queue.el](https://git.andros.dev/andros/async-http-queue-el)
+by **Andros Fenollosa** `<hi@andros.dev>`.
