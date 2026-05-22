@@ -116,7 +116,8 @@ Non-nil means the pager is active.")
     (condition-case err
         (progn
           (unless (file-exists-p bin)
-            (error "pager binary not found at %s" bin))
+            (error "pager binary not found at %s (load-dir=%s)"
+                   bin newst-jsonrpc--load-dir))
           (let ((conn (emacs-stdio-jsonrpc-start-app
                        "pager" bin (list db)))
                 (proc nil))
@@ -129,7 +130,7 @@ Non-nil means the pager is active.")
              "pager started: %s DB=%s" (file-name-nondirectory bin) db)
             t))
       (error
-       (newst-jsonrpc-debug "pager start failed: %S" err)
+       (message "[jrpc] pager start failed: %S" err)
        nil))))
 
 (defun newst-jsonrpc-stop ()
