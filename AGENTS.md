@@ -94,15 +94,22 @@ struct StmtGuard {
 };
 ```
 
-### Blocking I/O with poll()
-Replace `while (!g_quit) { process_queue(); sleep(50ms); }` with:
+### Main Loop
+The reader thread (inside `jsonrpc::Conn`) already uses `poll(STDIN_FILENO, 100ms)`
+internally. The main thread's job is simply to drain the message queue:
+
 ```cpp
-struct pollfd pfd = {STDIN_FILENO, POLLIN, 0};
-while (poll(&pfd, 1, -1) > 0) {
+while (!stopped) {
     server.process_queue();
-    if (server.stopped()) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 ```
+
+A pipe-based waker was evaluated but hit a `std::cin`/`poll()` buffering
+interaction: `std::cin`'s filebuf can consume data from the fd before `poll()`
+detects it. The simple sleep-loop avoids this entirely and adds negligible
+latency (the reader thread uses a 100ms poll timeout, so the maximum message
+processing delay is 100ms + 50ms = 150ms).
 
 ### Parallel Pre-fetch
 ```cpp
