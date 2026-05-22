@@ -55,9 +55,29 @@
 ;; Internal state
 ;; ----------------------------------------------------------------------
 
+(defvar newst-jsonrpc-pager-path nil
+  "Explicit path to the pager binary.
+If nil, auto-detect relative to WHERE-THIS-FILE-WAS-LOADED-FROM
+\(handles both `load-file' and `eval-buffer').")
+
+(defun newst-jsonrpc--find-pager ()
+  "Locate the pager binary.
+Checks, in order:
+1. `newst-jsonrpc-pager-path' (if set)
+2. relative to `newst-jsonrpc--load-dir' (captured at load/eval time)
+3. `default-directory' (fallback)"
+  (or newst-jsonrpc-pager-path
+      (let ((dir (or newst-jsonrpc--load-dir default-directory)))
+        (expand-file-name "build/pager" dir))))
+
 (defvar newst-jsonrpc--load-dir
-  (when load-file-name (file-name-directory load-file-name))
+  ;; Captured at load/eval time so it works with both `load-file' and
+  ;; `eval-buffer'.
+  (or (when load-file-name (file-name-directory load-file-name))
+      (when buffer-file-name (file-name-directory buffer-file-name))
+      default-directory)
   "Directory where newst-jsonrpc.el was loaded from.")
+
 
 (defvar newst-jsonrpc-conn nil
   "JSON-RPC connection to pager subprocess.
@@ -88,8 +108,7 @@ Non-nil means the pager is active.")
 
 (defun newst-jsonrpc-start ()
   "Start pager subprocess.  Return t on success."
-  (let* ((dir (or newst-jsonrpc--load-dir default-directory))
-          (bin (expand-file-name "build/pager" dir))
+  (let* ((bin (newst-jsonrpc--find-pager))
           (db (if (and (boundp 'newsticker-dir) newsticker-dir)
                   (expand-file-name "cache.db" newsticker-dir)
                 (expand-file-name "cache.db"
@@ -269,8 +288,8 @@ of falling through to ORIG-FN which inserts the entire cache."
           (let ((inhibit-read-only t))
             (erase-buffer)
             (insert ";; pager not started\n")
-            (insert ";; M-x newst-jsonrpc-start RET to start manually\n")
-            (insert ";; or check that build/pager exists\n"))
+            (insert ";; M-x newst-jsonrpc-start RET to retry\n")
+            (insert ";; or set newst-jsonrpc-pager-path to the pager binary\n"))
           (newsticker-mode)
           (display-buffer buf)))
     (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
