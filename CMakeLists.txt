@@ -5,7 +5,7 @@ project(emacs-stdio-jsonrpc-newsticker)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(include deps/emacs-stdio-jsonrpc/include)
+include_directories(deps/emacs-stdio-jsonrpc/include)
 
 # SQLite3 for pager
 find_package(PkgConfig)
