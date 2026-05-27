@@ -24,7 +24,6 @@ streaming pager-based plainview.
 │       └── CMakeLists.txt
 ├── include/                       — json.hpp (nlohmann)
 └── test/
-    ├── test-emacs-stdio-jsonrpc-newsticker.el
     └── test-emacs-stdio-jsonrpc-newsticker-sqlite.el
 ```
 
