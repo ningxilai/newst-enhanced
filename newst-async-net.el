@@ -40,6 +40,7 @@
 (declare-function dom-by-tag "dom.el")
 (declare-function dom-tag "dom.el")
 (declare-function dom-text "dom.el")
+(declare-function dom-inner-text "dom.el")
 (declare-function dom-attr "dom.el")
 
 ;; ----------------------------------------------------------------------
@@ -85,6 +86,15 @@
   (when (search-forward "\n\n" nil t)
     (delete-region (point-min) (point))))
 
+(defun newst-async-net--dom-text (node)
+  "Return the textual content of NODE.
+Prefer `dom-inner-text' (Emacs 31 and later), which also picks up
+nested markup, and fall back to the older `dom-text' on earlier
+versions of Emacs."
+  (if (fboundp 'dom-inner-text)
+      (dom-inner-text node)
+    (with-no-warnings (dom-text node))))
+
 (defun newst-async-net--extract-items (dom)
   "Extract feed items from DOM.
 Returns (FEED-NAME FEED-TITLE (ITEM ...)) where each ITEM is
@@ -100,7 +110,7 @@ Time is (HIGH LOW MICRO PICO) as returned by `current-time'."
                              (car (dom-by-tag top 'channel))
                            top))
          (feed-title (let ((t-el (dom-by-tag top-for-title 'title)))
-                        (when t-el (dom-text (car t-el)))))
+                        (when t-el (newst-async-net--dom-text (car t-el)))))
          (raw-items (if is-atom
                          (dom-by-tag top 'entry)
                        (dom-by-tag top 'item)))
@@ -114,24 +124,24 @@ Time is (HIGH LOW MICRO PICO) as returned by `current-time'."
 
 (defun newst-async-net--item-to-list (item is-atom time pos)
   (let* ((title-el (car (dom-by-tag item 'title)))
-         (title (if title-el (dom-text title-el) "[untitled]"))
+         (title (if title-el (newst-async-net--dom-text title-el) "[untitled]"))
          (desc (if is-atom
                     (or (let ((c (car (dom-by-tag item 'content))))
-                          (and c (dom-text c)))
+                          (and c (newst-async-net--dom-text c)))
                         (let ((s (car (dom-by-tag item 'summary))))
-                          (and s (dom-text s))))
+                          (and s (newst-async-net--dom-text s))))
                   (let ((d (car (dom-by-tag item 'description))))
-                    (and d (dom-text d)))))
+                    (and d (newst-async-net--dom-text d)))))
          (link (if is-atom
                     (let ((l (car (dom-by-tag item 'link))))
-                      (if l (or (dom-attr l 'href) (dom-text l)) ""))
+                      (if l (or (dom-attr l 'href) (newst-async-net--dom-text l)) ""))
                   (let ((l (car (dom-by-tag item 'link))))
-                    (if l (dom-text l) ""))))
+                    (if l (newst-async-net--dom-text l) ""))))
          (guid (if is-atom
                     (let ((i (car (dom-by-tag item 'id))))
-                      (and i (dom-text i)))
+                      (and i (newst-async-net--dom-text i)))
                   (let ((g (car (dom-by-tag item 'guid))))
-                    (and g (dom-text g)))))
+                    (and g (newst-async-net--dom-text g)))))
          (extra (when guid
                    `((guid nil ,guid)))))
     (list title (or desc "") link

@@ -126,13 +126,40 @@
 ;; Core SQLite operations
 ;; ----------------------------------------------------------------------
 
+(defun newst-sql--to-seconds (tv)
+  "Return TV as float seconds.
+Accepts classic 4-lists, (HIGH LOW) pairs, dotted (TICKS . HZ) pairs
+as returned by `current-time' on newer Emacs, plain numbers, or nil."
+  (cond ((null tv)
+         0.0)
+        ((integerp tv)
+         (float tv))
+        ((floatp tv)
+         tv)
+        ((and (consp tv) (proper-list-p tv))
+         (+ (* (float (or (nth 0 tv) 0)) 65536.0)
+            (float (or (nth 1 tv) 0))
+            (/ (float (or (nth 2 tv) 0)) 1000000.0)
+            (/ (float (or (nth 3 tv) 0)) 1000000000000.0)))
+        ((consp tv)
+         (/ (float (car tv)) (float (or (cdr tv) 1))))
+        (t 0.0)))
+
+(defun newst-sql--time-parts (tv)
+  "Return (HIGH LOW MICRO PICO) integers for time value TV."
+  (let* ((s (newst-sql--to-seconds tv))
+         (hi (floor s 65536))
+         (lo (floor (- s (* hi 65536.0))))
+         (us (floor (* (- s (+ (* hi 65536.0) lo)) 1000000.0))))
+    (list hi lo us 0)))
+
 (defun newst-sql--item-to-row (feed-name item)
-  (let ((tv (newsticker--time item)))
+  (let ((tv (newst-sql--time-parts (newsticker--time item))))
     (list feed-name
           (newsticker--title item) (newsticker--desc item)
           (newsticker--link item)
-          (or (nth 0 tv) 0) (or (nth 1 tv) 0)
-          (or (nth 2 tv) 0) (or (nth 3 tv) 0)
+          (nth 0 tv) (nth 1 tv)
+          (nth 2 tv) (nth 3 tv)
           (symbol-name (newsticker--age item))
           (newsticker--pos item)
           (newsticker--preformatted-contents item)
