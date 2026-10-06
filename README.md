@@ -1,8 +1,8 @@
 # newst-enhanced
 
-Enhanced Newsticker: async feed download, SQLite cache, streaming pager-based plainview.
+Enhanced Newsticker: adaptive, high-throughput feed handling with a stock-like experience under light load.
 
-## Usage
+## Quick start
 
 ```elisp
 (require 'newsticker)
@@ -16,14 +16,14 @@ M-x newsticker-start RET
 M-x newsticker-plainview RET
 ```
 
-## Default behavior
+## What it does
 
-`newst-enhanced` is designed to feel like stock `newsticker` in normal use, while scaling automatically as feeds and latency grow.
+`newst-enhanced` keeps the bare `newsticker` feel in normal use, but automatically scales up when feed count, latency, or failures increase.
 
-- Low-load: near-stock `newsticker` behavior
-- High-load: runtime controller increases concurrency, page size, and trimming as needed
-- Safety: global hard cap + per-host cap + explicit user override still win
-- Recovery: if `cache.db` is corrupt, the package backs it up, rebuilds, and migrates from legacy `prin1` cache files
+- Light load: stays close to stock `newsticker`
+- Heavy load: raises concurrency, page size, and trimming as needed
+- Safe by default: global hard cap + per-host cap + explicit user overrides
+- Resilient: corrupt `cache.db` is backed up and rebuilt from legacy cache files
 
 ## Configuration
 
@@ -42,7 +42,7 @@ M-x newsticker-plainview RET
 (setq newst-async-net-timeout 15)
 ```
 
-Disable adaptive behavior with:
+Disable autoscale if needed:
 
 ```elisp
 (setq newst-async-net-auto-scale-enabled nil)
@@ -51,10 +51,10 @@ Disable adaptive behavior with:
 
 ## Files
 
-- `newst-jsonrpc.el` — streaming reader / pager
+- `newst-jsonrpc.el` — streaming plainview reader
 - `newst-async-net.el` — adaptive async fetch queue
 - `newst-sql.el` — SQLite cache and recovery layer
 
-## Notes
+## Design goal
 
-This package is intentionally conservative at the safety boundary, while adaptive by default in the runtime path: it preserves the stock experience under light load and keeps large feed sets usable under heavier load.
+This package is intentionally adaptive by default: it preserves the original experience under light load and keeps large feed sets usable under heavier load without sacrificing safety.
