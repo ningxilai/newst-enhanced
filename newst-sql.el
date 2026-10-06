@@ -13,10 +13,8 @@
 ;;; Commentary:
 
 ;; Drop-in SQLite persistence for Newsticker's feed cache.
-;; Simply (require 'newst-sql) — advice is installed automatically.
-;;
-;; Replaces the per-feed prin1 files with a single SQLite database
-;; at `newsticker-dir/cache.db'.
+;; The database recovery path is only triggered for real corruption or integrity
+;; failure, so ordinary cache usage remains stable.
 
 ;;; Code:
 
@@ -36,26 +34,13 @@
 (declare-function newsticker--extra "newst-backend.el")
 (declare-function newsticker--guid "newst-backend.el")
 
-;; ----------------------------------------------------------------------
-;; Internal state
-;; ----------------------------------------------------------------------
-
-(defvar newst-sql-db nil
-  "SQLite database handle for Newsticker cache.")
-
-(defvar newst-sql-debug nil
-  "When non-nil, print diagnostic messages for SQLite cache.")
+(defvar newst-sql-db nil)
+(defvar newst-sql-debug nil)
+(defvar newst-sql--migrated-flag nil)
 
 (defun newst-sql-debug (fmt &rest args)
   (when newst-sql-debug
     (apply #'message (concat "[newst-sql] " fmt) args)))
-
-;; ----------------------------------------------------------------------
-;; Database lifecycle
-;; ----------------------------------------------------------------------
-
-(defvar newst-sql--migrated-flag nil
-  "Non-nil once the single-file `.sqlite-migrated' check has run.")
 
 (defun newst-sql-db-path ()
   (expand-file-name "cache.db" newsticker-dir))
@@ -65,7 +50,6 @@
     (make-directory newsticker-dir t)))
 
 (defun newst-sql--db-integrity-ok (db)
-  "Return non-nil if DB passes PRAGMA integrity_check."
   (let* ((rows (sqlite-select db "PRAGMA integrity_check"))
          (row (and rows (car rows)))
          (status (and row (car row))))
@@ -74,15 +58,12 @@
          (string= (downcase status) "ok"))))
 
 (defun newst-sql--register-damaged-db ()
-  "Create a backup for a damaged DB and then tear it down so we can rebuild."
   (let* ((path (newst-sql-db-path))
          (migrated (expand-file-name ".sqlite-migrated" newsticker-dir)))
     (when (and path (file-exists-p path))
       (let ((bak (concat path ".corrupt-"
                          (format-time-string "%Y%m%d%H%M%S"))))
-        (condition-case nil
-            (copy-file path bak t)
-          (error nil))
+        (condition-case nil (copy-file path bak t) (error nil))
         (delete-file path)))
     (when (and migrated (file-exists-p migrated))
       (delete-file migrated))
@@ -103,16 +84,11 @@
                age TEXT NOT NULL DEFAULT 'new', item_pos INTEGER,
                preformatted_contents TEXT, preformatted_title TEXT,
                extra_elements TEXT, guid TEXT)")
-          (sqlite-execute newst-sql-db
-            "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
-          (sqlite-execute newst-sql-db
-            "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
-          (sqlite-execute newst-sql-db
-            "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
-          (sqlite-execute newst-sql-db
-            "PRAGMA journal_mode=WAL")
-          (sqlite-execute newst-sql-db
-            "PRAGMA synchronous=NORMAL")
+          (sqlite-execute newst-sql-db "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
+          (sqlite-execute newst-sql-db "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
+          (sqlite-execute newst-sql-db "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
+          (sqlite-execute newst-sql-db "PRAGMA journal_mode=WAL")
+          (sqlite-execute newst-sql-db "PRAGMA synchronous=NORMAL")
           (newst-sql--maybe-migrate))
       (error
        (message "newst-sql: database damaged or unreadable (%s); rebuilding from prin1 migration path"
@@ -122,33 +98,23 @@
          (setq newst-sql-db nil))
        (newst-sql--register-damaged-db)
        (setq newst-sql-db (sqlite-open path nil nil))
-       (sqlite-execute newst-sql-db
-         "CREATE TABLE IF NOT EXISTS items (
+       (sqlite-execute newst-sql-db "CREATE TABLE IF NOT EXISTS items (
             feed_name TEXT NOT NULL, title TEXT, description TEXT, link TEXT,
             time_high INTEGER, time_low INTEGER, time_micro INTEGER, time_pico INTEGER,
             age TEXT NOT NULL DEFAULT 'new', item_pos INTEGER,
             preformatted_contents TEXT, preformatted_title TEXT,
             extra_elements TEXT, guid TEXT)")
-       (sqlite-execute newst-sql-db
-         "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
-       (sqlite-execute newst-sql-db
-         "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
-       (sqlite-execute newst-sql-db
-         "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
-       (sqlite-execute newst-sql-db
-         "PRAGMA journal_mode=WAL")
-       (sqlite-execute newst-sql-db
-         "PRAGMA synchronous=NORMAL")
-       (newst-sql--maybe-migrate))))
+       (sqlite-execute newst-sql-db "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
+       (sqlite-execute newst-sql-db "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
+       (sqlite-execute newst-sql-db "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
+       (sqlite-execute newst-sql-db "PRAGMA journal_mode=WAL")
+       (sqlite-execute newst-sql-db "PRAGMA synchronous=NORMAL")
+       (newst-sql--maybe-migrate)))))
 
 (defun newst-sql-close ()
   (when newst-sql-db
     (sqlite-close newst-sql-db)
     (setq newst-sql-db nil)))
-
-;; ----------------------------------------------------------------------
-;; Migration from prin1 files
-;; ----------------------------------------------------------------------
 
 (defun newst-sql--maybe-migrate ()
   (unless newst-sql--migrated-flag
@@ -176,20 +142,10 @@
         (insert (format-time-string ";; Migrated %Y-%m-%d %H:%M:%S\n")))
       (newst-sql-debug "migration complete"))))
 
-;; ----------------------------------------------------------------------
-;; Core SQLite operations
-;; ----------------------------------------------------------------------
-
 (defun newst-sql--to-seconds (tv)
-  "Return TV as float seconds.
-Accepts classic 4-lists, (HIGH LOW) pairs, dotted (TICKS . HZ) pairs
-as returned by `current-time' on newer Emacs, plain numbers, or nil."
-  (cond ((null tv)
-         0.0)
-        ((integerp tv)
-         (float tv))
-        ((floatp tv)
-         tv)
+  (cond ((null tv) 0.0)
+        ((integerp tv) (float tv))
+        ((floatp tv) tv)
         ((and (consp tv) (proper-list-p tv))
          (+ (* (float (or (nth 0 tv) 0)) 65536.0)
             (float (or (nth 1 tv) 0))
@@ -200,7 +156,6 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
         (t 0.0)))
 
 (defun newst-sql--time-parts (tv)
-  "Return (HIGH LOW MICRO PICO) integers for time value TV."
   (let* ((s (newst-sql--to-seconds tv))
          (hi (floor s 65536))
          (lo (floor (- s (* hi 65536.0))))
@@ -242,14 +197,8 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
     (newst-sql--item-to-row feed-name item)))
 
-;; ----------------------------------------------------------------------
-;; Cache advice implementations (replace newsticker--cache-*)
-;; ----------------------------------------------------------------------
-
 (defun newst-sql-save ()
-  "Override for `newsticker--cache-save': write entire cache to SQLite."
-  (unless newst-sql-db
-    (newst-sql-init))
+  (unless newst-sql-db (newst-sql-init))
   (let ((db newst-sql-db))
     (with-sqlite-transaction db
       (sqlite-execute db "DELETE FROM items")
@@ -260,22 +209,17 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
   (newst-sql-debug "cache saved (%d feeds)" (length newsticker--cache)))
 
 (defun newst-sql-save-feed (feed)
-  "Override for `newsticker--cache-save-feed': save one feed to SQLite."
-  (unless newst-sql-db
-    (newst-sql-init))
+  (unless newst-sql-db (newst-sql-init))
   (let ((db newst-sql-db)
         (feed-name (symbol-name (car feed))))
     (with-sqlite-transaction db
-      (sqlite-execute db "DELETE FROM items WHERE feed_name = ?"
-                      (list feed-name))
+      (sqlite-execute db "DELETE FROM items WHERE feed_name = ?" (list feed-name))
       (dolist (item (cdr feed))
         (newst-sql--insert-item db feed-name item))))
   (newst-sql-debug "feed saved: %s" (car feed)))
 
 (defun newst-sql-read ()
-  "Override for `newsticker--cache-read': load entire cache from SQLite."
-  (unless newst-sql-db
-    (newst-sql-init))
+  (unless newst-sql-db (newst-sql-init))
   (setq newsticker--cache nil)
   (let ((db newst-sql-db)
         (cur-feed nil) (cur-items nil))
@@ -297,33 +241,18 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
       (push (cons cur-feed (nreverse cur-items)) newsticker--cache)))
   (newst-sql-debug "cache loaded (%d feeds)" (length newsticker--cache)))
 
-;; ----------------------------------------------------------------------
-;; Interactive commands
-;; ----------------------------------------------------------------------
-
 (defun newst-sql-rebuild-cache ()
-  "Delete SQLite cache and re-migrate from prin1 files."
   (interactive)
   (require 'newsticker)
   (let ((db-path (newst-sql-db-path))
         (migrated (expand-file-name ".sqlite-migrated" newsticker-dir)))
     (newst-sql-close)
-    (when (file-exists-p db-path)
-      (delete-file db-path)
-      (message "newst-sql: deleted %s" db-path))
-    (when (file-exists-p migrated)
-      (delete-file migrated)
-      (message "newst-sql: deleted %s" migrated))
+    (when (file-exists-p db-path) (delete-file db-path) (message "newst-sql: deleted %s" db-path))
+    (when (file-exists-p migrated) (delete-file migrated) (message "newst-sql: deleted %s" migrated))
     (setq newst-sql--migrated-flag nil)
     (newst-sql-init)
     (message "newst-sql: cache rebuilt from prin1 files")))
 
-;; ----------------------------------------------------------------------
-;; Auto-install cache advice on load
-;; ----------------------------------------------------------------------
-
-;; Safe even if newsticker is not yet loaded: advice-add stores pending
-;; advice that is applied when the target function is later defined.
 (advice-add 'newsticker--cache-save :override #'newst-sql-save)
 (advice-add 'newsticker--cache-read :override #'newst-sql-read)
 (advice-add 'newsticker--cache-save-feed :override #'newst-sql-save-feed)
@@ -348,70 +277,8 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 n
+
 
 
 
