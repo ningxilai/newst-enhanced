@@ -45,18 +45,26 @@
   :group 'newsticker)
 
 (defcustom newst-jsonrpc-page-size 20
-  "Number of items to fetch when streaming more content."
+  "Number of items to fetch when streaming more content.
+This is the legacy/static default when auto-scale is disabled."
   :type 'integer
   :group 'newst-jsonrpc)
 
 (defcustom newst-jsonrpc-stream-max-items 200
-  "Maximum items kept in the streaming buffer before trimming old ones."
+  "Maximum items kept in the streaming buffer before trimming old ones.
+This is the legacy/static default when auto-scale is disabled."
   :type 'integer
+  :group 'newst-jsonrpc)
+
+(defcustom newst-jsonrpc-auto-scale-enabled nil
+  "When non-nil, the pager uses runtime-derived values for page size,
+trim window and description length.  Explicit user customizations still win."
+  :type 'boolean
   :group 'newst-jsonrpc)
 
 (defvar newst-jsonrpc-max-desc-length 2000
   "Truncate item descriptions to this many characters.
-Set to nil for no truncation.")
+Set to nil for no truncation.  Legacy/static default when autoscale is off.")
 
 ;; ----------------------------------------------------------------------
 ;; Internal state
@@ -81,6 +89,37 @@ Set to nil for no truncation.")
   (when newst-jsonrpc-debug
     (apply #'message (concat "[jrpc-nw] " fmt) args)))
 
+(defun newst-jsonrpc--effective-page-size ()
+  "Return the effective page size for the current runtime state."
+  (if (not newst-jsonrpc-auto-scale-enabled)
+      newst-jsonrpc-page-size
+    (let* ((feed-count (length (append newsticker-url-list newsticker-url-list-defaults)))
+           (base (max 5 (ceiling (/ (float feed-count) 10.0)))))
+      (if (not (eq newst-jsonrpc-page-size 20))
+          newst-jsonrpc-page-size
+        (min 200 (max 5 (+ base 5)))))))
+
+(defun newst-jsonrpc--effective-stream-max-items ()
+  "Return the effective trim limit for the running pager."
+  (if (not newst-jsonrpc-auto-scale-enabled)
+      newst-jsonrpc-stream-max-items
+    (let* ((feed-count (length (append newsticker-url-list newsticker-url-list-defaults)))
+           (target (max 50 (* 2 feed-count))))
+      (if (not (eq newst-jsonrpc-stream-max-items 200))
+          newst-jsonrpc-stream-max-items
+        (min 2000 target)))))
+
+(defun newst-jsonrpc--effective-max-desc-length ()
+  "Return the effective description length cap for the current runtime."
+  (if (not newst-jsonrpc-auto-scale-enabled)
+      newst-jsonrpc-max-desc-length
+    (let* ((feed-count (length (append newsticker-url-list newsticker-url-list-defaults))))
+      (if (not (eq newst-jsonrpc-max-desc-length 2000))
+          newst-jsonrpc-max-desc-length
+        (cond ((> feed-count 400) 512)
+              ((> feed-count 150) 1024)
+              (t 2000))))))
+
 ;; ----------------------------------------------------------------------
 ;; In-memory page fetch (replaces the pager subprocess)
 ;; ----------------------------------------------------------------------
@@ -94,13 +133,14 @@ symbols, so intern before lookup."
 
 (defun newst-jsonrpc--truncate-item (item)
   "Return a copy of ITEM with its description truncated per config."
-  (if (and newst-jsonrpc-max-desc-length (nth 1 item))
-      (let ((copy (copy-sequence item)))
-        (setcar (nthcdr 1 copy)
-                (truncate-string-to-width
-                 (nth 1 item) newst-jsonrpc-max-desc-length))
-        copy)
-    item))
+  (let ((limit (newst-jsonrpc--effective-max-desc-length)))
+    (if (and limit (nth 1 item))
+        (let ((copy (copy-sequence item)))
+          (setcar (nthcdr 1 copy)
+                  (truncate-string-to-width
+                   (nth 1 item) limit))
+          copy)
+      item)))
 
 (defun newst-jsonrpc--fetch (feed-name offset limit)
   "Return (ITEMS . TOTAL) slicing the in-memory cache.
@@ -158,13 +198,14 @@ Trim from front if over `newst-jsonrpc-stream-max-items'.
 Point is preserved or moved to first item if a rebuild was needed."
   (let* ((buf (get-buffer "*newsticker*"))
          (sym (intern newst-jsonrpc-feed-name))
+         (max-items (newst-jsonrpc--effective-stream-max-items))
          (over 0))
     (setq newst-jsonrpc-page-content
           (append newst-jsonrpc-page-content new-items))
     ;; Trim from front if over limit
     (let ((total (length newst-jsonrpc-page-content)))
-      (when (> total newst-jsonrpc-stream-max-items)
-        (setq over (- total newst-jsonrpc-stream-max-items)
+      (when (> total max-items)
+        (setq over (- total max-items)
               newst-jsonrpc-page-content (nthcdr over newst-jsonrpc-page-content)
               newst-jsonrpc-offset (+ newst-jsonrpc-offset over))))
     (if (> over 0)
@@ -189,13 +230,14 @@ Updates `newst-jsonrpc-offset'.  Trim from end if over limit.
 Point is preserved or moved to first item if a rebuild was needed."
   (let* ((buf (get-buffer "*newsticker*"))
          (sym (intern newst-jsonrpc-feed-name))
+         (max-items (newst-jsonrpc--effective-stream-max-items))
          (over 0))
     (setq newst-jsonrpc-offset (- newst-jsonrpc-offset (length new-items))
           newst-jsonrpc-page-content (append new-items newst-jsonrpc-page-content))
     ;; Trim from end if over limit
     (let ((total (length newst-jsonrpc-page-content)))
-      (when (> total newst-jsonrpc-stream-max-items)
-        (setq over (- total newst-jsonrpc-stream-max-items)
+      (when (> total max-items)
+        (setq over (- total max-items)
               newst-jsonrpc-page-content (butlast newst-jsonrpc-page-content over))))
     (if (> over 0)
         ;; Rebuild from scratch after trimming
@@ -220,7 +262,7 @@ Point is preserved or moved to first item if a rebuild was needed."
   (setq newst-jsonrpc-feed-name feed-name
         newst-jsonrpc-offset offset)
   (let* ((result (newst-jsonrpc--fetch
-                  feed-name offset newst-jsonrpc-page-size))
+                  feed-name offset (newst-jsonrpc--effective-page-size)))
          (items (car result))
          (total (cdr result)))
     (setq newst-jsonrpc-total total
@@ -247,7 +289,7 @@ Wraps to next feed at end."
           (newsticker--buffer-goto '(item)))
       (let* ((result (newst-jsonrpc--fetch
                       newst-jsonrpc-feed-name buf-end
-                      newst-jsonrpc-page-size))
+                      (newst-jsonrpc--effective-page-size)))
              (new-items (car result))
              (new-total (cdr result)))
         (setq newst-jsonrpc-total new-total)
@@ -263,7 +305,7 @@ Wraps to prev feed at start."
         (progn
           (newst-jsonrpc--prev-feed)
           (newsticker--buffer-goto '(item)))
-      (let* ((prev-offset (max 0 (- buf-start newst-jsonrpc-page-size)))
+      (let* ((prev-offset (max 0 (- buf-start (newst-jsonrpc--effective-page-size))))
              (chunk-size (- buf-start prev-offset))
              (result (newst-jsonrpc--fetch
                       newst-jsonrpc-feed-name prev-offset chunk-size))
@@ -361,3 +403,253 @@ Load previous feed's first page from the cache."
 
 (provide 'newst-jsonrpc)
 ;;; newst-jsonrpc.el ends here
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+n

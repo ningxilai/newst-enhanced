@@ -64,28 +64,82 @@
   (unless (file-directory-p newsticker-dir)
     (make-directory newsticker-dir t)))
 
+(defun newst-sql--db-integrity-ok (db)
+  "Return non-nil if DB passes PRAGMA integrity_check."
+  (let* ((rows (sqlite-select db "PRAGMA integrity_check"))
+         (row (and rows (car rows)))
+         (status (and row (car row))))
+    (and status
+         (stringp status)
+         (string= (downcase status) "ok"))))
+
+(defun newst-sql--register-damaged-db ()
+  "Create a backup for a damaged DB and then tear it down so we can rebuild."
+  (let* ((path (newst-sql-db-path))
+         (migrated (expand-file-name ".sqlite-migrated" newsticker-dir)))
+    (when (and path (file-exists-p path))
+      (let ((bak (concat path ".corrupt-"
+                         (format-time-string "%Y%m%d%H%M%S"))))
+        (condition-case nil
+            (copy-file path bak t)
+          (error nil))
+        (delete-file path)))
+    (when (and migrated (file-exists-p migrated))
+      (delete-file migrated))
+    (setq newst-sql--migrated-flag nil)))
+
 (defun newst-sql-init ()
   (newst-sql-ensure-dir)
   (let ((path (newst-sql-db-path)))
-    (setq newst-sql-db (sqlite-open path nil nil))
-    (sqlite-execute newst-sql-db
-      "CREATE TABLE IF NOT EXISTS items (
-         feed_name TEXT NOT NULL, title TEXT, description TEXT, link TEXT,
-         time_high INTEGER, time_low INTEGER, time_micro INTEGER, time_pico INTEGER,
-         age TEXT NOT NULL DEFAULT 'new', item_pos INTEGER,
-         preformatted_contents TEXT, preformatted_title TEXT,
-         extra_elements TEXT, guid TEXT)")
-    (sqlite-execute newst-sql-db
-      "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
-    (sqlite-execute newst-sql-db
-      "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
-    (sqlite-execute newst-sql-db
-      "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
-    (sqlite-execute newst-sql-db
-      "PRAGMA journal_mode=WAL")
-    (sqlite-execute newst-sql-db
-      "PRAGMA synchronous=NORMAL")
-    (newst-sql--maybe-migrate)))
+    (condition-case err
+        (progn
+          (setq newst-sql-db (sqlite-open path nil nil))
+          (unless (newst-sql--db-integrity-ok newst-sql-db)
+            (signal 'error (list "sqlite integrity_check failed")))
+          (sqlite-execute newst-sql-db
+            "CREATE TABLE IF NOT EXISTS items (
+               feed_name TEXT NOT NULL, title TEXT, description TEXT, link TEXT,
+               time_high INTEGER, time_low INTEGER, time_micro INTEGER, time_pico INTEGER,
+               age TEXT NOT NULL DEFAULT 'new', item_pos INTEGER,
+               preformatted_contents TEXT, preformatted_title TEXT,
+               extra_elements TEXT, guid TEXT)")
+          (sqlite-execute newst-sql-db
+            "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
+          (sqlite-execute newst-sql-db
+            "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
+          (sqlite-execute newst-sql-db
+            "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
+          (sqlite-execute newst-sql-db
+            "PRAGMA journal_mode=WAL")
+          (sqlite-execute newst-sql-db
+            "PRAGMA synchronous=NORMAL")
+          (newst-sql--maybe-migrate))
+      (error
+       (message "newst-sql: database damaged or unreadable (%s); rebuilding from prin1 migration path"
+                (error-message-string err))
+       (when newst-sql-db
+         (condition-case nil (sqlite-close newst-sql-db) (error nil))
+         (setq newst-sql-db nil))
+       (newst-sql--register-damaged-db)
+       (setq newst-sql-db (sqlite-open path nil nil))
+       (sqlite-execute newst-sql-db
+         "CREATE TABLE IF NOT EXISTS items (
+            feed_name TEXT NOT NULL, title TEXT, description TEXT, link TEXT,
+            time_high INTEGER, time_low INTEGER, time_micro INTEGER, time_pico INTEGER,
+            age TEXT NOT NULL DEFAULT 'new', item_pos INTEGER,
+            preformatted_contents TEXT, preformatted_title TEXT,
+            extra_elements TEXT, guid TEXT)")
+       (sqlite-execute newst-sql-db
+         "CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_name)")
+       (sqlite-execute newst-sql-db
+         "CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid)")
+       (sqlite-execute newst-sql-db
+         "CREATE INDEX IF NOT EXISTS idx_items_age ON items(age)")
+       (sqlite-execute newst-sql-db
+         "PRAGMA journal_mode=WAL")
+       (sqlite-execute newst-sql-db
+         "PRAGMA synchronous=NORMAL")
+       (newst-sql--maybe-migrate))))
 
 (defun newst-sql-close ()
   (when newst-sql-db
@@ -116,8 +170,8 @@
                     (condition-case err
                         (dolist (item (read (current-buffer)))
                           (newst-sql--insert-item db feed-dir item))
-                    (error (message "newst-sql: migrate error %s: %s"
-                                    feed-dir (error-message-string err)))))))))))
+                      (error (message "newst-sql: migrate error %s: %s"
+                                      feed-dir (error-message-string err)))))))))))
       (with-temp-file migrated
         (insert (format-time-string ";; Migrated %Y-%m-%d %H:%M:%S\n")))
       (newst-sql-debug "migration complete"))))
@@ -276,3 +330,97 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
 
 (provide 'newst-sql)
 ;;; newst-sql.el ends here
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+n

@@ -52,11 +52,30 @@
   :group 'newsticker)
 
 (defcustom newst-async-net-max-concurrent 3
-  "Maximum concurrent feed downloads."
+  "Maximum concurrent feed downloads.
+This is the legacy/static default used when autoscale is disabled."
+  :type 'integer :group 'newst-async-net)
+
+(defcustom newst-async-net-auto-scale-enabled nil
+  "When non-nil, dynamically adjust concurrency and timeout from
+runtime metrics and feed count.  This keeps legacy/static behavior when nil."
+  :type 'boolean :group 'newst-async-net)
+
+(defcustom newst-async-net-min-concurrent 4
+  "Minimum concurrency when autoscale is enabled."
+  :type 'integer :group 'newst-async-net)
+
+(defcustom newst-async-net-max-concurrent-hardcap 64
+  "Absolute max concurrency when autoscale is enabled."
+  :type 'integer :group 'newst-async-net)
+
+(defcustom newst-async-net-latency-target 1500
+  "Target median latency in milliseconds used by autoscale heuristics."
   :type 'integer :group 'newst-async-net)
 
 (defcustom newst-async-net-timeout 15
-  "Timeout in seconds for each feed download."
+  "Timeout in seconds for each feed download.
+Used as the static/default timeout when autoscale is disabled."
   :type 'integer :group 'newst-async-net)
 
 (defvar newst-async-net-debug nil
@@ -75,6 +94,76 @@
 
 (defvar newst-async-net--queue nil
   "Queue of (FEED-NAME URL) pending download.")
+
+(defvar newst-async-net--metrics (make-hash-table :test 'equal)
+  "Recent latency/error metrics for autoscaling.")
+
+;; ----------------------------------------------------------------------
+;; Metrics / autoscale helpers
+;; ----------------------------------------------------------------------
+
+(defun newst-async-net--record-metric (latency-ms ok)
+  "Record one request latency metric.
+LATENCY-MS is a number, OK is non-nil on success."
+  (let* ((vec (gethash :latencies newst-async-net--metrics))
+         (idx (gethash :lat-index newst-async-net--metrics 0)))
+    (unless vec
+      (puthash :latencies (make-vector 128 nil) newst-async-net--metrics)
+      (puthash :lat-index 0 newst-async-net--metrics)
+      (setq vec (gethash :latencies newst-async-net--metrics)))
+    (aset vec idx latency-ms)
+    (puthash :lat-index (mod (1+ idx) (length vec)) newst-async-net--metrics)
+    (puthash :count (1+ (gethash :count newst-async-net--metrics 0))
+             newst-async-net--metrics)
+    (unless ok
+      (puthash :errors (1+ (gethash :errors newst-async-net--metrics 0))
+               newst-async-net--metrics))))
+
+(defun newst-async-net--recent-median-latency-ms ()
+  "Return the median latency from the recent metric window, or 0 if empty."
+  (let* ((vec (gethash :latencies newst-async-net--metrics))
+         (vals (and vec (cl-remove-if-not #'numberp (append vec nil)))))
+    (if (null vals)
+        0
+      (let* ((sorted (sort (copy-sequence vals) #'<))
+             (n (length sorted)))
+        (if (oddp n)
+            (nth (/ n 2) sorted)
+          (/ (+ (nth (/ n 2) sorted)
+                (nth (1- (/ n 2)) sorted))
+             2))))))
+
+(defun newst-async-net--suggest-concurrency (feed-count)
+  "Return a concurrency recommendation based on FEED-COUNT and metrics.
+Uses the legacy/static value when autoscale is disabled."
+  (if (not newst-async-net-auto-scale-enabled)
+      (min newst-async-net-max-concurrent newst-async-net-max-concurrent-hardcap)
+    (let* ((base (max newst-async-net-min-concurrent
+                      (ceiling (/ (float feed-count) 20.0))))
+           (median-ms (newst-async-net--recent-median-latency-ms))
+           (adj (cond
+                 ((and (> median-ms 0)
+                       (< median-ms newst-async-net-latency-target))
+                  (min newst-async-net-max-concurrent-hardcap
+                       (1+ base)))
+                 ((and (> median-ms 0)
+                       (> median-ms (* 2 newst-async-net-latency-target)))
+                  (max newst-async-net-min-concurrent
+                       (floor (* base 0.6))))
+                 (t base))))
+      (min adj newst-async-net-max-concurrent-hardcap))))
+
+(defun newst-async-net--suggest-timeout ()
+  "Return a timeout recommendation in seconds for the current metrics."
+  (if (not newst-async-net-auto-scale-enabled)
+      newst-async-net-timeout
+    (let ((median-ms (newst-async-net--recent-median-latency-ms)))
+      (cond
+       ((= median-ms 0) newst-async-net-timeout)
+       ((< median-ms 1000) 8)
+       ((< median-ms 2000) 12)
+       ((< median-ms 4000) 16)
+       (t 20)))))
 
 ;; ----------------------------------------------------------------------
 ;; Feed item extractor
@@ -106,14 +195,14 @@ Time is (HIGH LOW MICRO PICO) as returned by `current-time'."
                 (or (car (dom-by-tag dom 'feed)) dom)))
          (is-atom (eq 'feed (dom-tag top)))
          (top-for-title (if (and (not is-atom)
-                                  (eq 'rss (dom-tag top)))
-                             (car (dom-by-tag top 'channel))
-                           top))
+                                   (eq 'rss (dom-tag top)))
+                            (car (dom-by-tag top 'channel))
+                          top))
          (feed-title (let ((t-el (dom-by-tag top-for-title 'title)))
-                        (when t-el (newst-async-net--dom-text (car t-el)))))
+                       (when t-el (newst-async-net--dom-text (car t-el)))))
          (raw-items (if is-atom
-                         (dom-by-tag top 'entry)
-                       (dom-by-tag top 'item)))
+                        (dom-by-tag top 'entry)
+                      (dom-by-tag top 'item)))
          (time (current-time))
          (pos 0))
     (list feed-title
@@ -126,24 +215,24 @@ Time is (HIGH LOW MICRO PICO) as returned by `current-time'."
   (let* ((title-el (car (dom-by-tag item 'title)))
          (title (if title-el (newst-async-net--dom-text title-el) "[untitled]"))
          (desc (if is-atom
-                    (or (let ((c (car (dom-by-tag item 'content))))
-                          (and c (newst-async-net--dom-text c)))
-                        (let ((s (car (dom-by-tag item 'summary))))
-                          (and s (newst-async-net--dom-text s))))
-                  (let ((d (car (dom-by-tag item 'description))))
-                    (and d (newst-async-net--dom-text d)))))
+                   (or (let ((c (car (dom-by-tag item 'content))))
+                         (and c (newst-async-net--dom-text c)))
+                       (let ((s (car (dom-by-tag item 'summary))))
+                         (and s (newst-async-net--dom-text s))))
+                 (let ((d (car (dom-by-tag item 'description))))
+                   (and d (newst-async-net--dom-text d)))))
          (link (if is-atom
-                    (let ((l (car (dom-by-tag item 'link))))
-                      (if l (or (dom-attr l 'href) (newst-async-net--dom-text l)) ""))
-                  (let ((l (car (dom-by-tag item 'link))))
-                    (if l (newst-async-net--dom-text l) ""))))
+                   (let ((l (car (dom-by-tag item 'link))))
+                     (if l (or (dom-attr l 'href) (newst-async-net--dom-text l)) ""))
+                 (let ((l (car (dom-by-tag item 'link))))
+                   (if l (newst-async-net--dom-text l) ""))))
          (guid (if is-atom
-                    (let ((i (car (dom-by-tag item 'id))))
-                      (and i (newst-async-net--dom-text i)))
-                  (let ((g (car (dom-by-tag item 'guid))))
-                    (and g (newst-async-net--dom-text g)))))
+                   (let ((i (car (dom-by-tag item 'id))))
+                     (and i (newst-async-net--dom-text i)))
+                 (let ((g (car (dom-by-tag item 'guid))))
+                   (and g (newst-async-net--dom-text g)))))
          (extra (when guid
-                   `((guid nil ,guid)))))
+                  `((guid nil ,guid)))))
     (list title (or desc "") link
           time 'new pos nil nil extra)))
 
@@ -153,10 +242,12 @@ Time is (HIGH LOW MICRO PICO) as returned by `current-time'."
 
 (defun newst-async-net--dequeue ()
   "Start next queued download if under limit."
-  (when (and newst-async-net--queue
-             (< newst-async-net--active newst-async-net-max-concurrent))
-    (let ((item (pop newst-async-net--queue)))
-      (newst-async-net--fetch-url (car item) (cadr item)))))
+  (let* ((feed-count (length (append newsticker-url-list newsticker-url-list-defaults)))
+         (limit (newst-async-net--suggest-concurrency feed-count)))
+    (when (and newst-async-net--queue
+               (< newst-async-net--active limit))
+      (let ((item (pop newst-async-net--queue)))
+        (newst-async-net--fetch-url (car item) (cadr item))))))
 
 ;; ----------------------------------------------------------------------
 ;; Result processing
@@ -220,52 +311,68 @@ timeout timer, concurrency tracking via newst-async-net--active."
   (cl-incf newst-async-net--active)
   (let ((timeout-timer nil)
         (callback-called nil)
-        (url-buffer nil))
+        (url-buffer nil)
+        (start-time (current-time))
+        (timeout-seconds (if newst-async-net-auto-scale-enabled
+                             (newst-async-net--suggest-timeout)
+                           newst-async-net-timeout)))
     (setq url-buffer
           (let ((coding-system-for-read 'no-conversion))
             (url-retrieve
              url
              (lambda (status)
-                (when timeout-timer
-                  (cancel-timer timeout-timer))
-                (unless callback-called
-                  (setq callback-called t)
-                  (let ((buf (current-buffer)))
-                    (unwind-protect
-                        (when (buffer-live-p buf)
-                          (with-current-buffer buf
-                            (let ((err-flag (plist-get status :error)))
-                              (if err-flag
-                                  (newst-async-net-debug
-                                   "download error %s: %S" url err-flag)
-                                (newst-async-net--mime-strip)
-                                (condition-case parse-err
-                                    (let* ((dom (libxml-parse-xml-region
-                                                 (point-min) (point-max)))
-                                           (result (and dom
-                                                        (newst-async-net--extract-items
-                                                         dom))))
-                                      (when result
-                                        (newst-async-net--process-result
-                                         feed-name
-                                         (cons feed-name (cadr result)))))
-                                  (error
+               (when timeout-timer
+                 (cancel-timer timeout-timer))
+               (unless callback-called
+                 (setq callback-called t)
+                 (let ((buf (current-buffer)))
+                   (unwind-protect
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           (let ((err-flag (plist-get status :error)))
+                             (if err-flag
+                                 (progn
                                    (newst-async-net-debug
-                                    "parse error %s: %S" url parse-err))))))
-                      (condition-case nil
-                          (kill-buffer buf)
-                        (error nil)))
-                    (setq newst-async-net--active
-                          (1- newst-async-net--active))
-                    (newst-async-net--dequeue))))
-              nil t))))
+                                    "download error %s: %S" url err-flag)
+                                   (newst-async-net--record-metric
+                                    (* 1000 newst-async-net-timeout) nil))
+                               (newst-async-net--mime-strip)
+                               (condition-case parse-err
+                                   (let* ((dom (libxml-parse-xml-region
+                                                (point-min) (point-max)))
+                                          (result (and dom
+                                                       (newst-async-net--extract-items
+                                                        dom))))
+                                     (when result
+                                       (newst-async-net--process-result
+                                        feed-name
+                                        (cons feed-name (cadr result)))
+                                       (newst-async-net--record-metric
+                                        (round (* 1000.0 (float-time
+                                                          (time-subtract (current-time)
+                                                                         start-time))))
+                                        t)))
+                                 (error
+                                  (newst-async-net-debug
+                                   "parse error %s: %S" url parse-err)
+                                  (newst-async-net--record-metric
+                                   (* 1000 newst-async-net-timeout) nil))))))))
+                     (condition-case nil
+                         (kill-buffer buf)
+                       (error nil)))
+                   (setq newst-async-net--active
+                         (1- newst-async-net--active))
+                   (newst-async-net--dequeue))))
+             nil t))))
     (ignore timeout-timer callback-called url-buffer)
     (setq timeout-timer
-          (run-at-time newst-async-net-timeout nil
+          (run-at-time timeout-seconds nil
                        (lambda ()
                          (unless callback-called
                            (setq callback-called t)
                            (newst-async-net-debug "timeout %s" url)
+                           (newst-async-net--record-metric
+                            (* 1000 timeout-seconds) nil)
                            (when (and url-buffer
                                       (buffer-live-p url-buffer))
                              (let ((proc (get-buffer-process url-buffer)))
@@ -285,12 +392,14 @@ timeout timer, concurrency tracking via newst-async-net--active."
 (defun newst-async-net-advice-get-news-by-url (_orig-fn feed-name url)
   ":around advice for `newsticker--get-news-by-url'.
 Routes through concurrent download queue with url-retrieve."
-  (if (< newst-async-net--active newst-async-net-max-concurrent)
-      (newst-async-net--fetch-url feed-name url)
-    (push (list feed-name url) newst-async-net--queue)
-    (newst-async-net-debug "queued %s (active=%d queue=%d)"
-                           feed-name newst-async-net--active
-                           (length newst-async-net--queue))))
+  (let* ((feed-count (length (append newsticker-url-list newsticker-url-list-defaults)))
+         (limit (newst-async-net--suggest-concurrency feed-count)))
+    (if (< newst-async-net--active limit)
+        (newst-async-net--fetch-url feed-name url)
+      (push (list feed-name url) newst-async-net--queue)
+      (newst-async-net-debug "queued %s (active=%d queue=%d)"
+                            feed-name newst-async-net--active
+                            (length newst-async-net--queue)))))
 
 ;; Install advice unconditionally.
 (advice-add 'newsticker--get-news-by-url :around
@@ -298,3 +407,650 @@ Routes through concurrent download queue with url-retrieve."
 
 (provide 'newst-async-net)
 ;;; newst-async-net.el ends here
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+a
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
