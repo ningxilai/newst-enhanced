@@ -7,46 +7,17 @@ streaming pager-based plainview.
 
 ```
 .
-├── CMakeLists.txt                 — builds pager (C++17)
 ├── README.md
 ├── AGENTS.md
-├── newst-jsonrpc.el               — pager-based plainview (entry point)
+├── newst-jsonrpc.el               — streaming plainview (entry point)
 ├── newst-async-net.el             — concurrent feed download queue
 ├── newst-sql.el                   — SQLite cache backend
-├── src/
-│   ├── pager.cpp                  — main(), JSON-RPC registration
-│   ├── db.h / db.cpp              — DatabaseManager (RAII, pre-fetch)
-│   └── utf8.h / utf8.cpp          — sanitize_utf8
-├── deps/
-│   └── emacs-stdio-jsonrpc/       — JSON-RPC 2.0 stdio transport
-│       ├── emacs-stdio-jsonrpc.el — Elisp side
-│       ├── include/jsonrpc.hpp    — C++ Conn class
-│       └── CMakeLists.txt
-├── include/                       — json.hpp (nlohmann)
 └── test/
-    └── test-emacs-stdio-jsonrpc-newsticker-sqlite.el
+    ├── test-emacs-stdio-jsonrpc-newsticker-sqlite.el
+    └── test-newst-jsonrpc-paging.el
 ```
 
 ## Components
-
-### C++ — `pager` binary
-
-JSON-RPC 2.0 server over stdio. Reads from the same SQLite database
-that `newst-sql` writes to.
-
-| Method       | Params                         | Returns                           |
-|--------------|--------------------------------|-----------------------------------|
-| `open`       | `{path: string}`               | `true`                            |
-| `list_feeds` | `{}`                           | `[{name, count}]`                 |
-| `get_page`   | `{feed, offset?, limit?}`      | `{items, total, offset, count}`   |
-| `exit`       | `{}`                           | notification                      |
-
-Key implementation:
-- **`COUNT(*) OVER() AS total`** — single round-trip for pagination
-- **`StmtGuard`** — RAII wrapper for `sqlite3_stmt` (auto-finalize)
-- **Parallel pre-fetch** — `std::async` loads next page in background
-- **Sleep-based main loop** (50ms) — reader thread uses `poll(STDIN_FILENO, 100ms)`
-  internally; pipe-based waker hit `std::cin`/`poll()` buffering interaction
 
 ### `newst-sql.el` — SQLite cache
 
@@ -72,9 +43,11 @@ Queue management derived from `async-http-queue.el` by Andros Fenollosa.
 - Installs `:around` advice on `newsticker--get-news-by-url`
 - Stores results into `newsticker--cache` → persisted by `newst-sql`
 
-### `newst-jsonrpc.el` — Streaming pager plainview
+### `newst-jsonrpc.el` — Streaming plainview pager
 
-The user-facing entry point. Installs `:around` advice on:
+The user-facing entry point. Pages are sliced directly from the
+in-memory `newsticker--cache` — no subprocess, no transport, no page
+cache. Installs `:around` advice on:
 
 | Target function                          | Handler                                  |
 |------------------------------------------|------------------------------------------|
@@ -88,14 +61,6 @@ The user-facing entry point. Installs `:around` advice on:
 - "n" at last item → appends next chunk to buffer end
 - "p" at first item → prepends previous chunk at buffer start
 - Buffer capped at `newst-jsonrpc-stream-max-items` (default 200), trims far end
-- **LRU page cache** (20 entries) — previously viewed pages restore instantly
-
-**Lazy pager start** — first `newsticker-plainview` call starts the `pager`
-subprocess automatically. Binary auto-detected relative to load directory
-(or set `newst-jsonrpc-pager-path` explicitly).
-
-**Load-path auto-setup** — when loaded via `load-file` or `emacs -l`,
-adds source directory and `deps/emacs-stdio-jsonrpc/` to `load-path`.
 
 ## Dependency Chain
 
@@ -104,18 +69,9 @@ adds source directory and `deps/emacs-stdio-jsonrpc/` to `load-path`.
   → (require 'newst-async-net)
       → (require 'newst-sql)
           → (require 'sqlite)        ; built-in
-  → (require 'jsonrpc)               ; built-in
-  → (require 'emacs-stdio-jsonrpc)   ; bundled in deps/
 ```
 
-## Build
-
-```sh
-cmake -B build
-cmake --build build
-```
-
-No new dependencies beyond sqlite3 headers and emacs-stdio-jsonrpc (bundled).
+No dependencies beyond Emacs 29.1 built-ins. No build step — pure Elisp.
 
 ## Usage
 

@@ -4,16 +4,13 @@
 
 (let* ((script-dir (file-name-directory (or load-file-name default-directory)))
        (project-root (expand-file-name ".." script-dir))
-       (deps-path (expand-file-name "deps/emacs-stdio-jsonrpc" project-root))
        (test-dir (make-temp-file "newsticker-sqlite-test-" t))
        (log '())
        (pass 0)
        (fail 0))
 
-  (push deps-path load-path)
   (push project-root load-path)
-  (require 'emacs-stdio-jsonrpc)
-  (require 'newst-sql)
+  (require 'newst-jsonrpc)
 
   (setq newsticker-dir (expand-file-name "newsticker/" test-dir))
 

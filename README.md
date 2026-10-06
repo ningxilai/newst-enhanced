@@ -5,18 +5,9 @@ and streaming pager-based plainview.
 
 ## Requirements
 
-- Emacs 29.1+
-- C++ compiler with C++17 support (for building `pager`)
-- SQLite3 development headers (for building `pager`)
+- Emacs 29.1+ (built-in `sqlite.el` for the cache backend)
 
-## Build
-
-```sh
-cmake -B build
-cmake --build build
-```
-
-This produces `build/pager` — the C++ JSON-RPC backend.
+No build step, no external dependencies.
 
 ## Usage
 
@@ -66,30 +57,23 @@ without erasing the buffer. Previously viewed pages are cached
 ;; Truncate item descriptions to this many chars (default: 2000)
 ;; Set to nil for no truncation
 (setq newst-jsonrpc-max-desc-length 2000)
-
-;; Explicit pager binary path (auto-detected by default)
-(setq newst-jsonrpc-pager-path "/path/to/build/pager")
 ```
 
 ## Architecture
 
 ```
-Emacs                          C++ (pager)
-─────                          ───────────
 newsticker (built-in)
   └─ newst-async-net           async feed download (url-retrieve)
        └─ newst-sql            SQLite cache (read/write)
-            └─ newst-jsonrpc   pager-based plainview
-                                └─ pager  ←─── reads ───→ SQLite DB
+            └─ newst-jsonrpc   streaming plainview, pages sliced
+                               directly from the in-memory cache
 ```
 
 - `newst-async-net` — concurrent feed download via `url-retrieve`,
   stores results in SQLite via newst-sql
 - `newst-sql` — overrides newsticker cache save/read with SQLite
 - `newst-jsonrpc` — around-advice on `newsticker--buffer-insert-all-items`
-  and navigation functions; lazy-starts the `pager` process
-- `pager` — C++ binary, reads from the same SQLite DB, serves pages
-  via JSON-RPC 2.0 over stdio
+  and navigation functions; streaming append/prepend pager
 
 ## Development
 
