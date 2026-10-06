@@ -2,133 +2,59 @@
 
 Enhanced Newsticker: async feed download, SQLite cache, streaming pager-based plainview.
 
-## Requirements
-
-- Emacs 29.1+ (built-in `sqlite.el` for the cache backend)
-
-No build step, no external dependencies — pure Elisp.
-
-## File Layout
-
-```
-.
-├── README.md
-├── newst-jsonrpc.el               — streaming plainview (entry point)
-├── newst-async-net.el             — concurrent feed download queue
-└── newst-sql.el                   — SQLite cache backend
-```
-
 ## Usage
 
-Add to `init.el`:
-
 ```elisp
-;; init.el
 (require 'newsticker)
 (require 'newst-jsonrpc)
 ```
 
-Then inside Emacs:
+Then:
 
-```
-M-x newsticker-start RET       ← start feed retrieval timer
-M-x newsticker-plainview RET   ← open streaming reader
+```text
+M-x newsticker-start RET
+M-x newsticker-plainview RET
 ```
 
-Or auto-open plainview on start:
+## Default behavior
+
+`newst-enhanced` is designed to feel like stock `newsticker` in normal use, while scaling automatically as feeds and latency grow.
+
+- Low-load: near-stock `newsticker` behavior
+- High-load: runtime controller increases concurrency, page size, and trimming as needed
+- Safety: global hard cap + per-host cap + explicit user override still win
+- Recovery: if `cache.db` is corrupt, the package backs it up, rebuilds, and migrates from legacy `prin1` cache files
+
+## Configuration
 
 ```elisp
-(add-hook 'newsticker-start-hook #'newsticker-plainview)
-```
+(setq newst-async-net-auto-scale-enabled t)
+(setq newst-jsonrpc-auto-scale-enabled t)
 
-### Key bindings (plainview buffer)
+(setq newst-async-net-hardcap-global 128)
+(setq newst-async-net-per-host-hardcap 8)
 
-These are the stock `newsticker-plainview` bindings; the pager advice makes them stream pages instead of moving out of range:
-
-| Key | Command |
-|-----|---------|
-| `n` / `TAB` | next item — appends the next page at the last item |
-| `p` | previous item — prepends the previous page at the first item |
-| `f` | next feed — loads that feed's first page |
-| `F` | previous feed |
-| `SPC` / `S-SPC` | scroll down / up |
-| `q` | close buffer |
-
-Page navigation is streaming — items are appended/prepended without erasing the buffer. The buffer is capped at `newst-jsonrpc-stream-max-items`; older items are trimmed from the far end.
-
-### Configuration
-
-```elisp
-;; Items per fetch chunk (default: 20)
+;; Optional explicit overrides
 (setq newst-jsonrpc-page-size 20)
-
-;; Max items kept in streaming buffer before trimming (default: 200)
 (setq newst-jsonrpc-stream-max-items 200)
-
-;; Truncate item descriptions to this many chars (default: 2000)
-;; Set to nil for no truncation
 (setq newst-jsonrpc-max-desc-length 2000)
-
-;; Concurrent feed downloads (default: 3)
 (setq newst-async-net-max-concurrent 3)
-
-;; Per-feed download timeout in seconds (default: 15)
 (setq newst-async-net-timeout 15)
 ```
 
-### `newst-sql.el` — SQLite cache
-
-Overrides three newsticker cache functions with SQLite:
-
-| Override target                   | Handler                |
-|-----------------------------------|------------------------|
-| `newsticker--cache-save`          | `newst-sql-save`       |
-| `newsticker--cache-read`          | `newst-sql-read`       |
-| `newsticker--cache-save-feed`     | `newst-sql-save-feed`  |
-
-Uses Emacs 29's built-in `sqlite.el`.  Database at `newsticker-dir/cache.db`.  Auto-migrates from the old `prin1` feed files on first load (creates a `.sqlite-migrated` sentinel).  WAL mode + `synchronous=NORMAL` for concurrent read access.
-
-### `newst-async-net.el` — Async download queue
-
-Concurrent feed download via `url-retrieve` with timeout timers. Queue management derived from `async-http-queue.el` by Andros Fenollosa.
-
-- Max concurrent downloads: `newst-async-net-max-concurrent` (default 3)
-- Per-feed timeout: `newst-async-net-timeout` (default 15s)
-- Installs `:around` advice on `newsticker--get-news-by-url`
-- Stores results into `newsticker--cache` → persisted by `newst-sql`
-
-### `newst-jsonrpc.el` — Streaming plainview pager
-
-The user-facing entry point.  Pages are sliced directly from the in-memory `newsticker--cache` — no subprocess, no transport, no page cache.  Installs `:around` advice on:
-
-| Target function                          | Handler                           |
-|------------------------------------------|-----------------------------------|
-| `newsticker--buffer-insert-all-items`    | `newst-jsonrpc-advice-insert-all` |
-| `newsticker-next-item`                   | `newst-jsonrpc-advice-next-item`  |
-| `newsticker-previous-item`               | `newst-jsonrpc-advice-prev-item`  |
-| `newsticker-next-feed`                   | `newst-jsonrpc-advice-next-feed`  |
-| `newsticker-previous-feed`               | `newst-jsonrpc-advice-prev-feed`  |
-
-**Streaming buffer model** — items are appended/prepended without erasing:
-
-- `n` at the last item → appends the next chunk to the buffer end
-- `p` at the first item → prepends the previous chunk to the buffer start
-- Buffer capped at `newst-jsonrpc-stream-max-items` (default 200), trims the far end
-
-## Development
-
-Load from source:
+Disable adaptive behavior with:
 
 ```elisp
-M-x load-file RET /path/to/newst-jsonrpc.el RET
+(setq newst-async-net-auto-scale-enabled nil)
+(setq newst-jsonrpc-auto-scale-enabled nil)
 ```
 
-Or from the command line:
+## Files
 
-```sh
-emacs -Q -L /path/to/newst-enhanced -l newst-jsonrpc.el
-```
+- `newst-jsonrpc.el` — streaming reader / pager
+- `newst-async-net.el` — adaptive async fetch queue
+- `newst-sql.el` — SQLite cache and recovery layer
 
-## Credits
+## Notes
 
-`newst-async-net` is based on [async-http-queue.el](https://git.andros.dev/andros/async-http-queue-el) by **Andros Fenollosa** `<hi@andros.dev>`. The queue management, timeout handling, and concurrent download pattern are derived from his original work.
+This package is intentionally conservative at the safety boundary, while adaptive by default in the runtime path: it preserves the stock experience under light load and keeps large feed sets usable under heavier load.
