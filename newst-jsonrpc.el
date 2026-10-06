@@ -77,6 +77,14 @@
 If nil, auto-detect relative to WHERE-THIS-FILE-WAS-LOADED-FROM
 \(handles both `load-file' and `eval-buffer').")
 
+(defvar newst-jsonrpc--load-dir
+  ;; Captured at load/eval time so it works with both `load-file' and
+  ;; `eval-buffer'.
+  (or (when load-file-name (file-name-directory load-file-name))
+      (when buffer-file-name (file-name-directory buffer-file-name))
+      default-directory)
+  "Directory where newst-jsonrpc.el was loaded from.")
+
 (defun newst-jsonrpc--find-pager ()
   "Locate the pager binary.
 Checks, in order:
@@ -86,15 +94,6 @@ Checks, in order:
   (or newst-jsonrpc-pager-path
       (let ((dir (or newst-jsonrpc--load-dir default-directory)))
         (expand-file-name "build/pager" dir))))
-
-(defvar newst-jsonrpc--load-dir
-  ;; Captured at load/eval time so it works with both `load-file' and
-  ;; `eval-buffer'.
-  (or (when load-file-name (file-name-directory load-file-name))
-      (when buffer-file-name (file-name-directory buffer-file-name))
-      default-directory)
-  "Directory where newst-jsonrpc.el was loaded from.")
-
 
 (defvar newst-jsonrpc-conn nil
   "JSON-RPC connection to pager subprocess.
@@ -167,10 +166,19 @@ Returns VAL so callers can use it in `or' chains."
 (defun newst-jsonrpc-start ()
   "Start pager subprocess.  Return t on success."
   (let* ((bin (newst-jsonrpc--find-pager))
-          (db (if (and (boundp 'newsticker-dir) newsticker-dir)
-                  (expand-file-name "cache.db" newsticker-dir)
-                (expand-file-name "cache.db"
-                                  (locate-user-emacs-file "newsticker")))))
+         (db (if (and (boundp 'newsticker-dir) newsticker-dir)
+                 (expand-file-name "cache.db" newsticker-dir)
+               (expand-file-name "cache.db"
+                                 (locate-user-emacs-file "newsticker")))))
+    ;; Ensure the SQLite cache exists before starting pager: pager
+    ;; auto-open fails (and every get_page then errors "database not
+    ;; opened") when the DB file or its directory is missing.  Only
+    ;; init when no live handle exists, so restarts never leak one.
+    (when (and (boundp 'newsticker-dir)
+               (boundp 'newst-sql-db)
+               (null newst-sql-db)
+               (fboundp 'newst-sql-init))
+      (newst-sql-init))
     (condition-case err
         (progn
           (unless (file-exists-p bin)
