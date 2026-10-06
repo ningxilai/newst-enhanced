@@ -95,20 +95,26 @@ PageResult DatabaseManager::do_get_page(const std::string& feed,
 
 PageResult DatabaseManager::get_page(const std::string& feed,
                                      int offset, int limit) {
-    // If we have a pre-fetched page for these exact params, consume it.
+    // Only consume the pre-fetched page on exact param match.
+    // A mismatch (feed switch, jump) discards it and fetches fresh —
+    // otherwise the caller would silently receive the wrong page.
     {
         std::lock_guard<std::mutex> lock(prefetch_mutex_);
         if (prefetched_.has_value()) {
-            auto result = std::move(*prefetched_);
+            PageRequest want{feed, offset, limit};
+            if (prefetched_->request == want) {
+                auto result = std::move(prefetched_->result);
+                prefetched_.reset();
+                return result;
+            }
             prefetched_.reset();
-            return result;
         }
     }
     return do_get_page(feed, offset, limit);
 }
 
 void DatabaseManager::prefetch_page(const std::string& feed,
-                                    int offset, int limit) {
+                                     int offset, int limit) {
     std::lock_guard<std::mutex> lock(prefetch_mutex_);
     if (prefetch_future_.valid()) {
         prefetch_future_.wait();
@@ -118,13 +124,16 @@ void DatabaseManager::prefetch_page(const std::string& feed,
         [this, feed, offset, limit] {
             auto result = do_get_page(feed, offset, limit);
             std::lock_guard<std::mutex> lock2(prefetch_mutex_);
-            prefetched_ = result;
+            prefetched_ = PrefetchedPage{{feed, offset, limit}, result};
         });
 }
 
 std::optional<PageResult> DatabaseManager::consume_prefetched() {
     std::lock_guard<std::mutex> lock(prefetch_mutex_);
-    auto result = prefetched_;
+    if (!prefetched_.has_value()) {
+        return std::nullopt;
+    }
+    auto result = std::move(prefetched_->result);
     prefetched_.reset();
     return result;
 }

@@ -12,6 +12,23 @@ struct PageResult {
     int total = 0;
 };
 
+// Identifies a page request. The prefetch slot is only consumed on an
+// exact match — otherwise a jump (feed switch, backward paging) would
+// silently receive the previously prefetched page.
+struct PageRequest {
+    std::string feed;
+    int offset = 0;
+    int limit = 0;
+    bool operator==(const PageRequest& o) const {
+        return feed == o.feed && offset == o.offset && limit == o.limit;
+    }
+};
+
+struct PrefetchedPage {
+    PageRequest request;
+    PageResult result;
+};
+
 // RAII guard for sqlite3_stmt — auto-finalize on destruction.
 struct StmtGuard {
     sqlite3_stmt* stmt = nullptr;
@@ -41,7 +58,7 @@ private:
     sqlite3* db_ = nullptr;
 
     std::mutex prefetch_mutex_;
-    std::optional<PageResult> prefetched_;
+    std::optional<PrefetchedPage> prefetched_;
     std::future<void> prefetch_future_;
 
     PageResult do_get_page(const std::string& feed, int offset, int limit);
